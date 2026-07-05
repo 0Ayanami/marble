@@ -213,10 +213,10 @@ class ProposalBuilder:
             return self_verification
         if not self_verification:
             return SelfVerificationScores(
-                veracity_score=0.5,
-                rationality_score=0.5,
-                value_score=0.5,
-                security_score=0.5,
+                veracity_score=0,
+                rationality_score=0,
+                value_score=0,
+                security_score=0,
             )
         return SelfVerificationScores(
             veracity_score=self_verification["veracity_score"],

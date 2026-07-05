@@ -27,12 +27,14 @@ class AgentWeightState:
 
     @property
     def verified_confidence(self) -> float:
+        # 采用滑动窗口保存最近K(20)个proposal的confidence score
         if not self.proposal_confidences:
             return self.initial_vc
         return sum(self.proposal_confidences) / len(self.proposal_confidences)
 
     @property
     def historical_confidence(self) -> float:
+        # 采用滑动窗口保存最近K(30)个vote的alignment score
         if not self.vote_alignments:
             return self.initial_hc
         return sum(1.0 for aligned in self.vote_alignments if aligned) / len(

@@ -57,9 +57,9 @@ class MajorityVoteConsensus:
         voter_agent_id: Optional[str] = None,
     ) -> ConsensusVote:
         """Convert one verification vector into a baseline vote."""
-        voter = voter_agent_id or verification.agent_id
+        voter = voter_agent_id or verification.verifier_agent_id
         if not voter:
-            raise ValueError("A consensus vote requires one voter.")
+            raise ValueError("A consensus vote requires a voter_agent_id.")
         
         confidence = verification.confidence_score
 
