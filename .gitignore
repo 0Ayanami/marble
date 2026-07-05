@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.vscode/
 
 # C extensions
 *.so
@@ -210,4 +211,5 @@ marble/logs
 marble/results
 backup/
 
-result/
+consensus_result/
+benchmark_result/
