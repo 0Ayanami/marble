@@ -9,12 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
 
 from litellm.utils import token_counter
 
-from marble.environments import BaseEnvironment, CodingEnvironment, WebEnvironment
+from marble.environments.base_env import BaseEnvironment
 from marble.llms.model_prompting import model_prompting
 from marble.memory import BaseMemory, SharedMemory
 from marble.utils.logger import get_logger
 
-EnvType = Union[BaseEnvironment, WebEnvironment, CodingEnvironment]
+EnvType = BaseEnvironment
 AgentType = TypeVar("AgentType", bound="BaseAgent")
 
 
@@ -70,7 +70,7 @@ class BaseAgent:
             f"user engagement while enriching interactions with other agents."
         )
         self.memory = BaseMemory()
-        self.shared_memory = SharedMemory()
+        self.shared_memory = shared_memory or SharedMemory()
         self.relationships: Dict[str, str] = {}
         self.logger = get_logger(self.__class__.__name__)
         self.logger.info(f"Agent '{self.agent_id}' initialized.")

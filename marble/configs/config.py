@@ -29,6 +29,7 @@ class Config:
         self.parallel = data.get("parallel", {})
         self.graph = data.get("graph", {})
         self.memory = data.get("memory", {})
+        self.consensus = data.get("consensus", {})
         self.engine_planner = data.get("engine_planner", {})
         self.task: Dict[str, Any] = data.get("task", {})
         self.coordination_mode = data.get("coordinate_mode", "centralized")
