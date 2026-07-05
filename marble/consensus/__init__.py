@@ -22,6 +22,12 @@ from marble.consensus.models import (
     VerificationVector,
 )
 from marble.consensus.majority_vote import MajorityVoteConsensus
+from marble.consensus.fisher_lda import (
+    FisherLDAResult,
+    FisherLDASample,
+    fit_fisher_lda_quality_weights,
+)
+from marble.consensus.smart_quorum import SmartQuorumConsensus
 from marble.consensus.proposal_builder import (
     HashSignatureProvider,
     ProposalBuilder,
@@ -48,6 +54,8 @@ __all__ = [
     "ConsensusVote",
     "ConsensusWorkflowResult",
     "DEFAULT_DIMENSION_WEIGHTS",
+    "FisherLDAResult",
+    "FisherLDASample",
     "HashSignatureProvider",
     "HeuristicProposalEvaluator",
     "KeyDecision",
@@ -67,10 +75,12 @@ __all__ = [
     "ProposalVerification",
     "SelfVerificationScores",
     "SignatureProvider",
+    "SmartQuorumConsensus",
     "VERIFICATION_DIMENSIONS",
     "VerificationContext",
     "VerificationEngine",
     "VerificationVector",
     "WeightManager",
+    "fit_fisher_lda_quality_weights",
     "load_consensus_env",
 ]

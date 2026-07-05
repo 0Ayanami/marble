@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
 import litellm
@@ -15,6 +14,11 @@ from marble.consensus.models import (
     MemoryProposal,
     VerificationContext,
     VerificationVector,
+)
+from marble.llms.model_prompting import (
+    load_provider_env,
+    normalize_model_and_base_url,
+    resolve_api_key,
 )
 
 
@@ -144,35 +148,13 @@ def load_consensus_env(
     *,
     include_commented: bool = True,
 ) -> None:
-    """Load API settings for consensus verification from a local .env file."""
-    path = Path(env_path)
-    if not path.exists():
-        return
+    """Load active .env settings for consensus verification.
 
-    allowed_keys = {"OPENAI_API_KEY", "BASE_URL", "BASE-URL", "MODEL"}
-    pending: Dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#"):
-            if not include_commented:
-                continue
-            line = line[1:].strip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key not in allowed_keys:
-            continue
-        normalized_key = "BASE_URL" if key == "BASE-URL" else key
-        value = value.strip().strip('"').strip("'")
-        if value and "xxxxx" not in value:
-            pending[normalized_key] = value
-
-    for key, value in pending.items():
-        if not os.environ.get(key) or "xxxxx" in os.environ.get(key, ""):
-            os.environ[key] = value
+    ``include_commented`` is retained for older callers but is intentionally
+    ignored. Provider settings now come only from active .env entries.
+    """
+    _ = include_commented
+    load_provider_env(env_path)
 
 
 class LLMProposalEvaluator:
@@ -194,10 +176,11 @@ class LLMProposalEvaluator:
                 env_path,
                 include_commented=include_commented_env,
             )
-        self.model = model or os.environ.get("MODEL") or "gpt-3.5-turbo"
-        self.base_url = base_url or os.environ.get("BASE_URL")
-        if self.base_url and "/" not in self.model:
-            self.model = f"openai/{self.model}"
+        raw_model = model or os.environ.get("MODEL") or "gpt-3.5-turbo"
+        self.model, self.base_url = normalize_model_and_base_url(raw_model)
+        if base_url and not self.model.startswith("together_ai/"):
+            self.base_url = base_url
+        self.api_key = resolve_api_key(self.base_url)
         self.dimension_weights = dimension_weights or DEFAULT_DIMENSION_WEIGHTS.copy()
         self.fallback_evaluator = fallback_evaluator
 
@@ -221,6 +204,7 @@ class LLMProposalEvaluator:
                 max_tokens=512,
                 temperature=0.0,
                 base_url=self.base_url,
+                api_key=self.api_key,
             )
             content = completion.choices[0].message.content or "{}"
             parsed = self._parse_json(content)

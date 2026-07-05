@@ -7,6 +7,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Union
 
+from marble.consensus.fisher_lda import (
+    FisherLDAResult,
+    RawSample,
+    fit_fisher_lda_quality_weights,
+)
+
 
 def _bounded_score(name: str, value: float) -> float:
     if not 0.0 <= float(value) <= 1.0:
@@ -172,6 +178,24 @@ class WeightManager:
 
     def snapshots(self) -> List[Dict[str, Union[float, str, int]]]:
         return [self.snapshot(agent_id) for agent_id in sorted(self._states)]
+
+    def fit_quality_weights(
+        self,
+        samples: Iterable[RawSample],
+        *,
+        update_theta: bool = False,
+        regularization: float = 1e-6,
+    ) -> FisherLDAResult:
+        """Fit alpha/beta from labeled vc/hc samples using Fisher LDA."""
+        result = fit_fisher_lda_quality_weights(
+            samples,
+            regularization=regularization,
+        )
+        self.alpha = result.alpha
+        self.beta = result.beta
+        if update_theta:
+            self.theta = result.theta
+        return result
 
     def _trim_left(self, values: Deque[object], max_length: int) -> None:
         while len(values) > max_length:
