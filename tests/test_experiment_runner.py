@@ -7,7 +7,8 @@ import pytest
 import yaml
 
 from marble.experiments.config import ExperimentConfig
-from marble.experiments.runner import ExperimentRunner
+from marble.experiments.benchmarks import BENCHMARK_ADAPTERS
+from marble.experiments.runner import ExperimentRunner, ExperimentSweepRunner
 
 
 def _base_experiment_config(output_root: Path) -> dict:
@@ -115,6 +116,7 @@ def test_experiment_runner_saves_reproducible_artifacts(tmp_path: Path) -> None:
     ).splitlines()
     proposal_records = [json.loads(line) for line in proposal_lines]
     assert len(proposal_records) == 3
+    assert all("consensus_layer_events" in record for record in proposal_records)
     assert {record["decision"]["result"] for record in proposal_records} == {
         "fail",
         "pass",
@@ -128,7 +130,98 @@ def test_experiment_runner_saves_reproducible_artifacts(tmp_path: Path) -> None:
     assert benchmark_result["byzantine_agent_count"] == 1
     assert benchmark_result["malicious_proposal_count"] == 1
     assert benchmark_result["malicious_block_rate"] == 1.0
+    assert benchmark_result["attack_dataset"]["enabled"] is False
+    assert benchmark_result["attack_dataset"]["type"] == "none"
     assert benchmark_result["paths"]["config_path"].endswith("config.yaml")
+
+
+def test_benchmark_adapter_assigns_honest_and_byzantine_models(
+    tmp_path: Path,
+) -> None:
+    config_data = _base_experiment_config(tmp_path)
+    config_data["agents"]["model"] = "default-model"
+    config_data["agents"]["honest_model"] = "strong-model"
+    config_data["agents"]["byzantine_model"] = "weak-model"
+    config_data["agents"]["agent_overrides"] = {
+        "agent2": {"llm": "agent-specific-model"}
+    }
+    config = ExperimentConfig.from_dict(config_data)
+    adapter = BENCHMARK_ADAPTERS.create(config.benchmark.type)
+    case = adapter.load_case(config)
+
+    engine_config = adapter.build_engine_config(
+        case=case,
+        config=config,
+        proposal_output_path=tmp_path / "proposal_result.jsonl",
+    )
+    llms = {
+        str(agent["agent_id"]): agent["llm"]
+        for agent in engine_config.agents
+    }
+
+    assert llms["agent1"] == "strong-model"
+    assert llms["agent2"] == "agent-specific-model"
+    assert llms["agent3"] == "weak-model"
+
+
+def test_benchmark_adapter_assigns_capability_coefficients(
+    tmp_path: Path,
+) -> None:
+    config_data = _base_experiment_config(tmp_path)
+    config_data["agents"]["model"] = "default-model"
+    config_data["agents"]["honest_model"] = "strong-model"
+    config_data["agents"]["byzantine_model"] = "weak-model"
+    config_data["agents"]["honest_capability_coefficient"] = 1.2
+    config_data["agents"]["byzantine_capability_coefficient"] = 0.7
+    config_data["proposal"]["consensus"]["strategy"] = "smart_quorum"
+    config = ExperimentConfig.from_dict(config_data)
+    adapter = BENCHMARK_ADAPTERS.create(config.benchmark.type)
+    case = adapter.load_case(config)
+
+    engine_config = adapter.build_engine_config(
+        case=case,
+        config=config,
+        proposal_output_path=tmp_path / "proposal_result.jsonl",
+    )
+    weights = engine_config.consensus["algorithm"]["agent_weights"]
+
+    assert weights["agent1"] == 1.2
+    assert weights["agent2"] == 1.2
+    assert weights["agent3"] == 0.7
+
+
+def test_experiment_sweep_runner_saves_progress_and_summary(tmp_path: Path) -> None:
+    config_data = _base_experiment_config(tmp_path)
+    config_data["experiment"]["run_id"] = "sweep_run"
+    first_task = dict(config_data["benchmark"]["inline_task"])
+    second_task = dict(config_data["benchmark"]["inline_task"])
+    first_task["task_id"] = 1
+    second_task["task_id"] = 2
+    second_task["task"] = {"content": "Design a second safe consensus benchmark."}
+    dataset_path = tmp_path / "tasks.jsonl"
+    dataset_path.write_text(
+        "\n".join(json.dumps(task) for task in [first_task, second_task]),
+        encoding="utf-8",
+    )
+    config_data["benchmark"].pop("inline_task")
+    config_data["benchmark"]["dataset"] = str(dataset_path)
+    config_data["benchmark"]["task_id"] = "1-2"
+
+    result = ExperimentSweepRunner(
+        ExperimentConfig.from_dict(config_data)
+    ).run_all_cases()
+
+    assert result.sweep_dir.exists()
+    assert result.progress_path.exists()
+    assert result.summary_path.exists()
+    assert len(result.results) == 2
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert summary["completed"] is True
+    assert summary["task_count"] == 2
+    assert summary["completed_task_count"] == 2
+    for record in result.results:
+        assert Path(record["proposal_result_path"]).exists()
+        assert Path(record["benchmark_result_path"]).exists()
 
 
 def test_experiment_cli_runs_static_smoke_config(tmp_path: Path) -> None:

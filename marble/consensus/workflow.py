@@ -85,6 +85,7 @@ class MemoryConsensusWorkflow:
             task_description=task_description,
             verifier_agent_ids=verifier_agent_ids,
         )
+        self._sync_consensus_weights()
         decision = self.consensus.decide(proposal, verifications)
         finalized_proposal = self._with_consensus_result(
             proposal=proposal,
@@ -220,6 +221,19 @@ class MemoryConsensusWorkflow:
             / len(verifications)
             for dimension in dimensions
         }
+
+    def _sync_consensus_weights(self) -> None:
+        if self.weight_manager is None:
+            return
+        set_agent_weights = getattr(self.consensus, "set_agent_weights", None)
+        if set_agent_weights is None:
+            return
+        set_agent_weights(
+            {
+                str(snapshot["agent_id"]): float(snapshot["weight"])
+                for snapshot in self.weight_manager.snapshots()
+            }
+        )
 
     def _update_agent_state(
         self,

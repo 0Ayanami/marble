@@ -1,8 +1,11 @@
 import math
+from types import SimpleNamespace
 
 from marble.consensus import (
     ConsensusMemory,
+    ConsensusLayer,
     FisherLDASample,
+    LLMProposalEvaluator,
     MajorityVoteConsensus,
     MemoryConsensusWorkflow,
     ProposalBuilder,
@@ -96,6 +99,53 @@ def test_verification_engine_evaluates_without_acceptance_decision() -> None:
     assert vector.confidence_score == 0.75
     assert "Potential security pattern" in vector.reasoning
     assert "result" not in vector.to_dict()
+
+
+def test_llm_evaluator_uses_verifier_agent_model(monkeypatch) -> None:
+    calls = []
+
+    def fake_completion(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            '{"veracity": 1, "rationality": 1, "value": 1, '
+                            '"security": 1, "reasoning": "ok"}'
+                        )
+                    )
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        "marble.consensus.verification_engine.litellm.completion",
+        fake_completion,
+    )
+    monkeypatch.setattr(
+        "marble.consensus.verification_engine.resolve_api_key",
+        lambda base_url: "test-key",
+    )
+    evaluator = LLMProposalEvaluator(
+        model="default-model",
+        agent_models={"agent_2": "strong-model", "agent_3": "weak-model"},
+        load_env=False,
+    )
+    proposal = ProposalBuilder().from_agent_output(
+        task_id="task_1",
+        agent_id="agent_1",
+        output="Useful memory.",
+    )
+
+    vector = evaluator.evaluate(
+        proposal,
+        VerificationContext(task_id="task_1"),
+        verifier_agent_id="agent_3",
+    )
+
+    assert vector.metadata["model"] == "weak-model"
+    assert calls[0]["model"] == "weak-model"
 
 
 def test_weight_manager_maintains_agent_state_independent_of_consensus() -> None:
@@ -229,6 +279,38 @@ def test_smart_quorum_accepts_when_accept_weight_exceeds_qc_and_majority() -> No
     )
 
 
+def test_smart_quorum_preserves_fisher_ida_configuration() -> None:
+    proposal = ProposalBuilder().from_agent_output(
+        task_id="task_1",
+        agent_id="agent_1",
+        output="Collected useful evidence.",
+    )
+    consensus = SmartQuorumConsensus(
+        confidence_threshold=0.6,
+        agent_weights={"agent_2": 2.0},
+        honest_agents=["agent_2"],
+        fisher_ida={
+            "enabled": True,
+            "alpha_initial": 0.7,
+            "beta_initial": 0.3,
+            "parameters": {"learning_rate": 0.1},
+        },
+        alpha_initial=0.7,
+        beta_initial=0.3,
+        epsilon=0.0,
+    )
+
+    decision = consensus.decide(
+        proposal,
+        [VerificationVector(1, 1, 1, 1, verifier_agent_id="agent_2")],
+    )
+
+    assert decision.metadata["fisher_ida"]["enabled"] is True
+    assert decision.metadata["fisher_ida"]["alpha_initial"] == 0.7
+    assert decision.metadata["fisher_ida"]["beta_initial"] == 0.3
+    assert decision.metadata["fisher_ida"]["parameters"]["learning_rate"] == 0.1
+
+
 def test_smart_quorum_rejects_weighted_majority_without_qc() -> None:
     proposal = ProposalBuilder().from_agent_output(
         task_id="task_1",
@@ -350,3 +432,45 @@ def test_workflow_records_zero_verified_confidence_for_failed_proposals() -> Non
     assert not result.decision.accepted
     assert result.decision.metadata["proposal_confidence_score"] == 0.0
     assert weight_manager.verified_confidence("agent_1") == 0.0
+
+
+def test_consensus_layer_waits_for_idle_agents_before_verification() -> None:
+    class FixedEvaluator:
+        def evaluate(self, proposal, context, verifier_agent_id=None):
+            return VerificationVector(1, 1, 1, 1, verifier_agent_id=verifier_agent_id)
+
+    workflow = MemoryConsensusWorkflow(
+        verification_engine=VerificationEngine(evaluator=FixedEvaluator()),
+        consensus=MajorityVoteConsensus(
+            confidence_threshold=0.6,
+            minimum_votes=2,
+        ),
+    )
+    layer = ConsensusLayer(
+        workflow=workflow,
+        agent_ids=["agent_1", "agent_2", "agent_3"],
+        min_verifiers=2,
+    )
+
+    layer.mark_agent_busy("agent_2")
+    result = layer.submit_proposal(
+        task_id="task_1",
+        task_description="Collect useful task evidence.",
+        proposer_agent_id="agent_1",
+        output="Found relevant source material.",
+    )
+
+    assert result is None
+    assert len(layer.pending) == 1
+    assert layer.completed_results == []
+
+    layer.mark_agent_idle("agent_2")
+
+    assert len(layer.pending) == 0
+    assert len(layer.completed_results) == 1
+    completed = layer.completed_results[0]
+    verifier_ids = {
+        vector.verifier_agent_id for vector in completed.verifications
+    }
+    assert verifier_ids == {"agent_2", "agent_3"}
+    assert completed.decision.accepted

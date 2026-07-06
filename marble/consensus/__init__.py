@@ -28,6 +28,11 @@ from marble.consensus.fisher_lda import (
     fit_fisher_lda_quality_weights,
 )
 from marble.consensus.smart_quorum import SmartQuorumConsensus
+from marble.consensus.layer import (
+    AgentActivityTracker,
+    ConsensusLayer,
+    ProposalSubmission,
+)
 from marble.consensus.proposal_builder import (
     HashSignatureProvider,
     ProposalBuilder,
@@ -48,8 +53,10 @@ from marble.consensus.workflow import (
 
 __all__ = [
     "AgentWeightState",
+    "AgentActivityTracker",
     "ConsensusMemory",
     "ConsensusDecision",
+    "ConsensusLayer",
     "ConsensusResult",
     "ConsensusVote",
     "ConsensusWorkflowResult",
@@ -71,6 +78,7 @@ __all__ = [
     "ProposalDataReference",
     "ProposalEvaluator",
     "ProposalObservation",
+    "ProposalSubmission",
     "ProposalThoughts",
     "ProposalVerification",
     "SelfVerificationScores",

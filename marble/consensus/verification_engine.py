@@ -164,6 +164,7 @@ class LLMProposalEvaluator:
         self,
         *,
         model: Optional[str] = None,
+        agent_models: Optional[Dict[str, str]] = None,
         base_url: Optional[str] = None,
         env_path: str = ".env",
         load_env: bool = True,
@@ -178,9 +179,16 @@ class LLMProposalEvaluator:
             )
         raw_model = model or os.environ.get("MODEL") or "gpt-3.5-turbo"
         self.model, self.base_url = normalize_model_and_base_url(raw_model)
+        self.base_url_override = base_url
         if base_url and not self.model.startswith("together_ai/"):
             self.base_url = base_url
         self.api_key = resolve_api_key(self.base_url)
+        self.agent_models = {
+            str(agent_id): str(agent_model)
+            for agent_id, agent_model in (agent_models or {}).items()
+            if agent_model
+        }
+        self._settings_cache: Dict[str, tuple[str, Optional[str], Optional[str]]] = {}
         self.dimension_weights = dimension_weights or DEFAULT_DIMENSION_WEIGHTS.copy()
         self.fallback_evaluator = fallback_evaluator
 
@@ -191,9 +199,10 @@ class LLMProposalEvaluator:
         verifier_agent_id: Optional[str] = None,
     ) -> VerificationVector:
         prompt = self._build_prompt(proposal, context)
+        model, base_url, api_key = self._settings_for_verifier(verifier_agent_id)
         try:
             completion = litellm.completion(
-                model=self.model,
+                model=model,
                 messages=[
                     {
                         "role": "system",
@@ -203,8 +212,8 @@ class LLMProposalEvaluator:
                 ],
                 max_tokens=512,
                 temperature=0.0,
-                base_url=self.base_url,
-                api_key=self.api_key,
+                base_url=base_url,
+                api_key=api_key,
             )
             content = completion.choices[0].message.content or "{}"
             parsed = self._parse_json(content)
@@ -216,7 +225,7 @@ class LLMProposalEvaluator:
                 reasoning=str(parsed.get("reasoning", "")),
                 verifier_agent_id=verifier_agent_id,
                 dimension_weights=self.dimension_weights.copy(),
-                metadata={"evaluator": "llm", "model": self.model},
+                metadata={"evaluator": "llm", "model": model},
             )
         except Exception:
             if self.fallback_evaluator is None:
@@ -226,6 +235,23 @@ class LLMProposalEvaluator:
                 context=context,
                 verifier_agent_id=verifier_agent_id,
             )
+
+    def _settings_for_verifier(
+        self,
+        verifier_agent_id: Optional[str],
+    ) -> tuple[str, Optional[str], Optional[str]]:
+        raw_model = None
+        if verifier_agent_id is not None:
+            raw_model = self.agent_models.get(str(verifier_agent_id))
+        raw_model = raw_model or self.model
+        if raw_model in self._settings_cache:
+            return self._settings_cache[raw_model]
+        model, base_url = normalize_model_and_base_url(raw_model)
+        if self.base_url_override and not model.startswith("together_ai/"):
+            base_url = self.base_url_override
+        settings = (model, base_url, resolve_api_key(base_url))
+        self._settings_cache[raw_model] = settings
+        return settings
 
     def _build_prompt(
         self, proposal: MemoryProposal, context: VerificationContext

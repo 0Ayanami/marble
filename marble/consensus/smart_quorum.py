@@ -27,6 +27,9 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         epsilon_ratio: float = 0.1,
         epsilon: Optional[float] = None,
         use_dynamic_estimate: bool = False,
+        fisher_ida: Optional[Mapping[str, object]] = None,
+        alpha_initial: float = 0.6,
+        beta_initial: float = 0.4,
 
         confidence_threshold: float = 0.6,
         majority_threshold: float = 0.5,
@@ -58,6 +61,9 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         self.epsilon_ratio = float(epsilon_ratio)
         self.epsilon = None if epsilon is None else float(epsilon)
         self.use_dynamic_estimate = use_dynamic_estimate
+        self.fisher_ida = dict(fisher_ida or {})
+        self.alpha_initial = float(alpha_initial)
+        self.beta_initial = float(beta_initial)
 
     def build_vote(
         self,
@@ -107,6 +113,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                     "reason": "minimum_votes_not_met",
                     "proposal_confidence_score": 0.0,
                     "proposal_confidence_method": "weighted_by_agent_weight",
+                    "fisher_ida": self.fisher_ida_metadata(),
                     "agent_weights": dict(self.agent_weights),
                     "honest_agents": sorted(self.honest_agents),
                     "byzantine_agents": sorted(self.byzantine_agents),
@@ -141,6 +148,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "has_weighted_majority": has_weighted_majority,
                 "proposal_confidence_score": proposal_confidence_score,
                 "proposal_confidence_method": "weighted_by_agent_weight",
+                "fisher_ida": self.fisher_ida_metadata(),
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
@@ -187,6 +195,14 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
     def weight_for(self, agent_id: str) -> float:
         return self.agent_weights.get(agent_id, 1.0)
 
+    def set_agent_weight(self, agent_id: str, weight: float) -> None:
+        if float(weight) < 0:
+            raise ValueError(f"Weight for {agent_id} cannot be negative.")
+        self.agent_weights[str(agent_id)] = float(weight)
+
+    def set_agent_weights(self, weights: Mapping[str, float]) -> None:
+        self.agent_weights.update(self._validate_weights(weights))
+
     def _validate_weights(
         self, weights: Mapping[str, float]
     ) -> Dict[str, float]:
@@ -205,3 +221,11 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
             sum(vote.confidence_score * max(vote.weight, 0.0) for vote in votes)
             / total_weight
         )
+
+    def fisher_ida_metadata(self) -> Dict[str, object]:
+        """Return reserved Fisher-IDA optimizer settings for traces."""
+        metadata = dict(self.fisher_ida)
+        metadata.setdefault("enabled", False)
+        metadata.setdefault("alpha_initial", self.alpha_initial)
+        metadata.setdefault("beta_initial", self.beta_initial)
+        return metadata
