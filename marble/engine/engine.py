@@ -8,31 +8,25 @@ from typing import Any, Dict, List, Optional, Union
 
 from marble.agent import BaseAgent
 from marble.configs.config import Config
-from marble.engine.engine_planner import EnginePlanner
-from marble.environments import (
-    BaseEnvironment,
-    CodingEnvironment,
-    DBEnvironment,
-    MinecraftEnvironment,
-    ResearchEnvironment,
-    WebEnvironment,
-    WorldSimulationEnvironment,
+from marble.consensus.majority_vote import MajorityVoteConsensus
+from marble.consensus.smart_quorum import SmartQuorumConsensus
+from marble.consensus.weight_manager import WeightManager
+from marble.consensus.workflow import MemoryConsensusWorkflow
+from marble.consensus.verification_engine import (
+    HeuristicProposalEvaluator,
+    LLMProposalEvaluator,
+    VerificationEngine,
 )
+from marble.memory.consensus_memory import ConsensusMemory
+from marble.engine.engine_planner import EnginePlanner
+from marble.environments.base_env import BaseEnvironment
 from marble.evaluator.evaluator import Evaluator
 from marble.graph.agent_graph import AgentGraph
 from marble.memory.base_memory import BaseMemory
 from marble.memory.shared_memory import SharedMemory
 from marble.utils.logger import get_logger
 
-EnvType = Union[
-    BaseEnvironment,
-    WebEnvironment,
-    ResearchEnvironment,
-    WorldSimulationEnvironment,
-    MinecraftEnvironment,
-    DBEnvironment,
-    CodingEnvironment,
-]
+EnvType = BaseEnvironment
 AgentType = Union[BaseAgent]
 
 
@@ -78,6 +72,9 @@ class Engine:
             agent.set_agent_graph(self.graph)
         # Initialize Memory
         self.memory = self._initialize_memory(config.memory)
+        if isinstance(self.memory, SharedMemory):
+            for agent in self.agents:
+                agent.shared_memory = self.memory
         # Initialize Evaluator
         self.evaluator = Evaluator(metrics_config=config.metrics)
         self.task = config.task.get("content", "")
@@ -115,26 +112,38 @@ class Engine:
         env_type = env_config.get("type")
 
         if env_type == "Web":
+            from marble.environments.web_env import WebEnvironment
+
             env1 = WebEnvironment(name="Web Environment", config=env_config)
             return env1
         elif env_type == "Base":
             env2 = BaseEnvironment(name="Base Environment", config=env_config)
             return env2
         elif env_type == "Research":
+            from marble.environments.research_env import ResearchEnvironment
+
             env3 = ResearchEnvironment(name="Research Environment", config=env_config)
             return env3
         elif env_type == "Coding":
+            from marble.environments.coding_env import CodingEnvironment
+
             env4 = CodingEnvironment(name="Coding Environment", config=env_config)
             return env4
         elif env_type == "WorldSimulation":
+            from marble.environments.world_env import WorldSimulationEnvironment
+
             env4 = WorldSimulationEnvironment(
                 name="World Simulation Environment", config=env_config
             )
             return env4
         elif env_type == "Minecraft":
+            from marble.environments.minecraft_env import MinecraftEnvironment
+
             env5 = MinecraftEnvironment(name="Minecraft Environment", config=env_config)
             return env5
         elif env_type == "DB":
+            from marble.environments.db_env import DBEnvironment
+
             env6 = DBEnvironment(name="DB Environment", config=env_config)
             return env6
         else:
@@ -166,7 +175,7 @@ class Engine:
             self.logger.debug(
                 f"Agent '{agent.agent_id}' of type '{agent_type}' using LLM '{agent_llm}' initialized."
             )
-            if isinstance(self.environment, MinecraftEnvironment):
+            if self._environment_is("MinecraftEnvironment"):
                 assert "agent_id" in agent_config and "agent_port" in agent_config
                 self.environment.register_agent(
                     agent_config.get("agent_id"), agent_config.get("agent_port")
@@ -178,7 +187,7 @@ class Engine:
 
     def _initialize_memory(
         self, memory_config: Dict[str, Any]
-    ) -> Union[SharedMemory, BaseMemory]:
+    ) -> Union[SharedMemory, BaseMemory, ConsensusMemory]:
         """
         Initialize the shared memory mechanism.
 
@@ -189,13 +198,145 @@ class Engine:
             BaseMemory: An instance of the memory module.
         """
         memory_type = memory_config.get("type", "SharedMemory")
-        memory: Union[BaseMemory, SharedMemory, None] = None
+        memory: Union[BaseMemory, SharedMemory, ConsensusMemory, None] = None
         if memory_type == "SharedMemory":
             memory = SharedMemory()
+        elif memory_type == "ConsensusMemory":
+            memory = ConsensusMemory()
         else:
             memory = BaseMemory()
         self.logger.debug(f"Memory of type '{memory_type}' initialized.")
         return memory
+
+    def _environment_is(self, class_name: str) -> bool:
+        return self.environment.__class__.__name__ == class_name
+
+    def _initialize_consensus_workflow(self) -> MemoryConsensusWorkflow:
+        consensus_config = self.config.consensus
+        if not isinstance(self.memory, ConsensusMemory):
+            self.memory = ConsensusMemory()
+            for agent in self.agents:
+                agent.shared_memory = self.memory
+
+        verification_config = consensus_config.get("verification", {})
+        verification_type = verification_config.get("type", "heuristic")
+        if verification_type == "llm":
+            fallback = (
+                HeuristicProposalEvaluator()
+                if verification_config.get("fallback_to_heuristic", True)
+                else None
+            )
+            evaluator = LLMProposalEvaluator(
+                model=verification_config.get("model"),
+                base_url=verification_config.get("base_url"),
+                env_path=verification_config.get("env_path", ".env"),
+                include_commented_env=verification_config.get(
+                    "include_commented_env", True
+                ),
+                fallback_evaluator=fallback,
+            )
+        else:
+            evaluator = HeuristicProposalEvaluator()
+
+        consensus_algorithm_config = consensus_config.get("algorithm", {})
+        consensus_strategy = consensus_algorithm_config.get(
+            "strategy",
+            consensus_algorithm_config.get("type", "majority_vote"),
+        )
+        common_consensus_kwargs = {
+            "confidence_threshold": consensus_algorithm_config.get(
+                "confidence_threshold", 0.6
+            ),
+            "majority_threshold": consensus_algorithm_config.get(
+                "majority_threshold", 0.5
+            ),
+            "strict_majority": consensus_algorithm_config.get(
+                "strict_majority", True
+            ),
+            "minimum_votes": consensus_algorithm_config.get("minimum_votes", 1),
+            "hard_fail_dimensions": consensus_algorithm_config.get(
+                "hard_fail_dimensions", ("security",)
+            ),
+        }
+        if consensus_strategy == "smart_quorum":
+            consensus = SmartQuorumConsensus(
+                agent_weights=consensus_algorithm_config.get("agent_weights", {}),
+                honest_agents=consensus_algorithm_config.get("honest_agents", []),
+                byzantine_agents=consensus_algorithm_config.get(
+                    "byzantine_agents", []
+                ),
+                epsilon_ratio=consensus_algorithm_config.get("epsilon_ratio", 0.1),
+                epsilon=consensus_algorithm_config.get("epsilon"),
+                use_dynamic_estimate=consensus_algorithm_config.get(
+                    "use_dynamic_estimate", False
+                ),
+                **common_consensus_kwargs,
+            )
+        else:
+            consensus = MajorityVoteConsensus(**common_consensus_kwargs)
+        weight_config = consensus_config.get("weight_manager", {})
+        weight_manager = (
+            WeightManager(**weight_config)
+            if consensus_config.get("enable_weight_manager", True)
+            else None
+        )
+        return MemoryConsensusWorkflow(
+            memory=self.memory,
+            verification_engine=VerificationEngine(evaluator=evaluator),
+            consensus=consensus,
+            weight_manager=weight_manager,
+            include_proposer_as_verifier=consensus_config.get(
+                "include_proposer_as_verifier", False
+            ),
+        )
+
+    def consensus_coordinate(self) -> None:
+        """Run proposal, verification, and majority-vote memory consensus."""
+        summary_data: Dict[str, Any] = {
+            "task": self.task,
+            "coordination_mode": self.coordinate_mode,
+            "consensus_algorithm": self.config.consensus.get("algorithm", {}).get(
+                "strategy",
+                self.config.consensus.get("algorithm", {}).get(
+                    "type", "majority_vote"
+                ),
+            ),
+            "results": [],
+            "committed_memory": [],
+        }
+        try:
+            workflow = self._initialize_consensus_workflow()
+            task_id = (
+                self.config.consensus.get("task_id")
+                or self.config.task.get("task_id")
+                or self.config.task.get("id")
+                or "consensus_task"
+            )
+            results = workflow.run_agents(
+                task_id=task_id,
+                task_description=self.task,
+                agents=self.graph.get_all_agents(),
+            )
+            summary_data["results"] = [result.to_dict() for result in results]
+            summary_data["committed_memory"] = [
+                proposal.to_dict()
+                for proposal in workflow.memory.retrieve_committed(task_id=task_id)
+            ]
+            summary_data["agent_weights"] = (
+                workflow.weight_manager.snapshots()
+                if workflow.weight_manager is not None
+                else []
+            )
+            self.logger.info(
+                "Consensus coordination completed with "
+                f"{len(summary_data['committed_memory'])} committed proposals."
+            )
+        except Exception:
+            self.logger.exception("An error occurred during consensus coordination.")
+            raise
+        finally:
+            self.evaluator.finalize()
+            self._write_to_jsonl(summary_data)
 
     def graph_coordinate(self) -> None:
         """
@@ -267,7 +408,7 @@ class Engine:
             iteration_data["summary"] = summary.content
 
             # Decide whether to continue or terminate after initial assignment
-            if isinstance(self.environment, MinecraftEnvironment):
+            if self._environment_is("MinecraftEnvironment"):
                 try:
                     with open("../data/score.json", "r") as f:
                         block_hit_rate = json.load(f)[-1]["block_hit_rate"]
@@ -412,7 +553,7 @@ class Engine:
                 # self.evaluator.evaluate_kpi(self.task, results_str)
                 self.evaluator.metrics["planning_score"].append(-1)
                 # Decide whether to continue or terminate
-                if isinstance(self.environment, MinecraftEnvironment):
+                if self._environment_is("MinecraftEnvironment"):
                     try:
                         with open("../data/score.json", "r") as f:
                             block_hit_rate = json.load(f)[-1]["block_hit_rate"]
@@ -448,7 +589,7 @@ class Engine:
                 "total_milestones"
             ]
             # if self.environment.name == 'Research Environment':
-            if isinstance(self.environment, ResearchEnvironment):
+            if self._environment_is("ResearchEnvironment"):
                 iteration_data_summary = iteration_data.get("summary")
                 assert isinstance(iteration_data_summary, str)
                 self.evaluator.evaluate_task_research(self.task, iteration_data_summary)
@@ -462,7 +603,7 @@ class Engine:
                     "task_evaluation"
                 ]
                 self.logger.info("Engine graph-based coordination loop completed.")
-            elif isinstance(self.environment, MinecraftEnvironment):
+            elif self._environment_is("MinecraftEnvironment"):
                 try:
                     with open("../data/score.json", "r") as f:
                         block_hit_rate = json.load(f)[-1]["block_hit_rate"]
@@ -1036,7 +1177,7 @@ class Engine:
         Start the engine to run the simulation.
         """
         self.logger.info("Engine starting simulation.")
-        if isinstance(self.environment, MinecraftEnvironment):
+        if self._environment_is("MinecraftEnvironment"):
             self.environment.launch()
         if self.coordinate_mode == "star":
             self.logger.info("Running in centralized coordination mode.")
@@ -1050,10 +1191,13 @@ class Engine:
         elif self.coordinate_mode == "tree":
             self.logger.info("Running in tree-based coordination mode.")
             self.tree_coordinate()
+        elif self.coordinate_mode == "consensus":
+            self.logger.info("Running in consensus memory coordination mode.")
+            self.consensus_coordinate()
         else:
             self.logger.error(f"Unsupported coordinate mode: {self.coordinate_mode}")
             raise ValueError(f"Unsupported coordinate mode: {self.coordinate_mode}")
-        if isinstance(self.environment, MinecraftEnvironment):
+        if self._environment_is("MinecraftEnvironment"):
             self.environment.finish()
 
     def _should_terminate(self) -> bool:

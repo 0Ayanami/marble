@@ -107,7 +107,12 @@ class MajorityVoteConsensus:
                 confidence_threshold=self.confidence_threshold,
                 total_weight=float(len(votes)),
                 accept_weight=float(sum(1 for vote in votes if vote.accept)),
-                metadata={"reason": "minimum_votes_not_met"},
+                metadata={
+                    "strategy": "majority_vote",
+                    "reason": "minimum_votes_not_met",
+                    "proposal_confidence_score": 0.0,
+                    "proposal_confidence_method": "arithmetic_mean",
+                },
             )
 
         accept_count = sum(1 for vote in votes if vote.accept)
@@ -117,6 +122,9 @@ class MajorityVoteConsensus:
             passed = acceptance_ratio > self.majority_threshold
         else:
             passed = acceptance_ratio >= self.majority_threshold
+        proposal_confidence_score = (
+            self._average_confidence(votes) if passed else 0.0
+        )
 
         return ConsensusDecision(
             proposal_id=proposal.proposal_id,
@@ -129,5 +137,14 @@ class MajorityVoteConsensus:
             confidence_threshold=self.confidence_threshold,
             total_weight=float(len(votes)),
             accept_weight=float(accept_count),
-            metadata={"strategy": "majority_vote"},
+            metadata={
+                "strategy": "majority_vote",
+                "proposal_confidence_score": proposal_confidence_score,
+                "proposal_confidence_method": "arithmetic_mean",
+            },
         )
+
+    def _average_confidence(self, votes: Sequence[ConsensusVote]) -> float:
+        if not votes:
+            return 0.0
+        return sum(vote.confidence_score for vote in votes) / len(votes)

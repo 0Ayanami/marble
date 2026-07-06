@@ -105,6 +105,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 metadata={
                     "strategy": "smart_quorum",
                     "reason": "minimum_votes_not_met",
+                    "proposal_confidence_score": 0.0,
+                    "proposal_confidence_method": "weighted_by_agent_weight",
                     "agent_weights": dict(self.agent_weights),
                     "honest_agents": sorted(self.honest_agents),
                     "byzantine_agents": sorted(self.byzantine_agents),
@@ -118,6 +120,9 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
             has_weighted_majority = acceptance_ratio >= self.majority_threshold
         has_quorum_certificate = accept_weight > quorum["qc"]
         passed = has_quorum_certificate and has_weighted_majority
+        proposal_confidence_score = (
+            self._weighted_confidence(votes) if passed else 0.0
+        )
 
         return ConsensusDecision(
             proposal_id=proposal.proposal_id,
@@ -134,6 +139,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "strategy": "smart_quorum",
                 "has_quorum_certificate": has_quorum_certificate,
                 "has_weighted_majority": has_weighted_majority,
+                "proposal_confidence_score": proposal_confidence_score,
+                "proposal_confidence_method": "weighted_by_agent_weight",
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
@@ -189,3 +196,12 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 raise ValueError(f"Weight for {agent_id} cannot be negative.")
             validated[str(agent_id)] = float(weight)
         return validated
+
+    def _weighted_confidence(self, votes: Sequence[ConsensusVote]) -> float:
+        total_weight = sum(max(vote.weight, 0.0) for vote in votes)
+        if total_weight <= 0.0:
+            return 0.0
+        return (
+            sum(vote.confidence_score * max(vote.weight, 0.0) for vote in votes)
+            / total_weight
+        )

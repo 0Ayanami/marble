@@ -97,7 +97,7 @@ class MemoryConsensusWorkflow:
         committed = decision.accepted
         if committed:
             self.memory.commit_proposal(finalized_proposal)
-        self._update_agent_state(finalized_proposal, verifications, decision)
+        self._update_agent_state(finalized_proposal, decision)
         return ConsensusWorkflowResult(
             proposal=finalized_proposal,
             verifications=verifications,
@@ -224,18 +224,13 @@ class MemoryConsensusWorkflow:
     def _update_agent_state(
         self,
         proposal: MemoryProposal,
-        verifications: Sequence[VerificationVector],
         decision: ConsensusDecision,
     ) -> None:
         if self.weight_manager is None:
             return
-        average_confidence = (
-            sum(vector.confidence_score for vector in verifications)
-            / len(verifications)
-            if verifications
-            else 0.0
+        proposal_confidence = float(
+            decision.metadata.get("proposal_confidence_score", 0.0)
         )
-        proposal_confidence = average_confidence if decision.accepted else 0.0
         self.weight_manager.record_proposal_confidence(
             proposal.agent_id,
             proposal_confidence,
