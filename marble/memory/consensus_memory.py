@@ -113,3 +113,54 @@ class ConsensusMemory(SharedMemory):
                 proposal for proposal in committed if proposal.agent_id == agent_id
             ]
         return committed
+
+    def get_memory_str(
+        self,
+        task_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        max_items: Optional[int] = None,
+    ) -> str:
+        """Render accepted consensus memories for agent prompt context.
+
+        Only committed proposals are exposed here. Raw proposals, verification
+        vectors, and consensus decisions remain available for experiment traces
+        but are intentionally not injected into agent prompts.
+        """
+        committed = self.retrieve_committed(task_id=task_id, agent_id=agent_id)
+        if max_items is not None:
+            committed = committed[-max(max_items, 0) :]
+        if not committed:
+            return ""
+        return "\n".join(
+            self._format_committed_proposal(index, proposal)
+            for index, proposal in enumerate(committed, start=1)
+        )
+
+    @staticmethod
+    def _format_committed_proposal(index: int, proposal: MemoryProposal) -> str:
+        header = proposal.header
+        body = proposal.body
+        parts = [
+            f"{index}. task_id={header.task_id}; "
+            f"agent_id={header.agent_id}; summary={header.proposal_summary}"
+        ]
+        if body.thoughts and body.thoughts.thoughts_abstract:
+            parts.append(f"thoughts={body.thoughts.thoughts_abstract}")
+        observations = [
+            item.description for item in body.observations if item.description
+        ]
+        if observations:
+            parts.append("observations=" + " | ".join(observations))
+        data_refs = [
+            item.content_snippet for item in body.data if item.content_snippet
+        ]
+        if data_refs:
+            parts.append("data=" + " | ".join(data_refs))
+        actions = [
+            f"{item.type}:{item.tool}:{item.status}"
+            for item in body.actions
+            if item.type or item.tool or item.status
+        ]
+        if actions:
+            parts.append("actions=" + " | ".join(actions))
+        return "; ".join(parts)

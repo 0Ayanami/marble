@@ -1,0 +1,42 @@
+experiment:
+  name: mab_groupchat_research
+  output_root: experiments
+  run_id: groupchat
+
+agents:
+  total: 5
+  model: qwen3.7-max-preview
+  capability_coefficient: 8.96
+  model_capability_coefficients:
+    qwen3.7-max-preview: 8.96
+  num_byzantine: 0
+
+collaboration:
+  mode: groupchat
+  rounds: 1
+  max_tokens: 384
+  temperature: 0.0
+  options:
+    use_agent_act: true
+
+proposal:
+  enabled: false
+  builder_enabled: false
+  verification_enabled: false
+  weight_manager_enabled: false
+  max_rounds: 1
+
+benchmark:
+  type: multiagentbench
+  environment: research
+  dataset: multiagentbench/research/research_main.jsonl
+  task_id: 1-10
+  output_dir: experiments/groupchat
+  defaults:
+    coordinate_mode: graph
+  options:
+    evaluate_kpi: true
+
+sweep:
+  agent_counts: [5, 7]
+

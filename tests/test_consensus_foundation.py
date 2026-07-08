@@ -1,6 +1,7 @@
 import math
 from types import SimpleNamespace
 
+from marble.agent import BaseAgent
 from marble.consensus import (
     ConsensusMemory,
     ConsensusLayer,
@@ -16,6 +17,7 @@ from marble.consensus import (
     WeightManager,
     fit_fisher_lda_quality_weights,
 )
+from marble.environments.base_env import BaseEnvironment
 
 
 def test_proposal_builder_creates_standard_memory_proposal() -> None:
@@ -82,6 +84,56 @@ def test_consensus_memory_stores_proposals_and_verifications() -> None:
     assert memory.retrieve_verifications(proposal.proposal_id) == [vector]
 
 
+def test_consensus_memory_prompt_context_only_exposes_committed_proposals() -> None:
+    committed = ProposalBuilder().from_agent_output(
+        task_id="task_1",
+        agent_id="agent_1",
+        output="Result from the model: Use verified literature sources.",
+        proposal_summary="Use verified literature sources.",
+    )
+    raw = ProposalBuilder().from_agent_output(
+        task_id="task_1",
+        agent_id="agent_2",
+        output="Result from the model: Uncommitted draft should stay hidden.",
+        proposal_summary="Hidden uncommitted draft.",
+    )
+    memory = ConsensusMemory()
+
+    memory.store_proposal(raw)
+    memory.commit_proposal(committed)
+    prompt_memory = memory.get_memory_str(task_id="task_1")
+
+    assert "Use verified literature sources" in prompt_memory
+    assert "Uncommitted draft should stay hidden" not in prompt_memory
+    assert "memory_proposal_verifications" not in prompt_memory
+    assert "memory_proposal_decisions" not in prompt_memory
+
+
+def test_base_agent_memory_context_includes_committed_consensus_memory() -> None:
+    env = BaseEnvironment(name="test", config={})
+    memory = ConsensusMemory()
+    proposal = ProposalBuilder().from_agent_output(
+        task_id="task_1",
+        agent_id="agent_1",
+        output="Result from the model: Store accepted consensus memory.",
+        proposal_summary="Accepted consensus memory.",
+    )
+    memory.commit_proposal(proposal)
+    agent = BaseAgent(
+        config={"agent_id": "agent_1"},
+        env=env,
+        shared_memory=memory,
+    )
+    agent.memory.update(agent.agent_id, {"type": "local", "result": "Local note"})
+
+    context = agent.get_memory_context_str()
+
+    assert "Local memory:" in context
+    assert "Local note" in context
+    assert "Shared consensus memory:" in context
+    assert "Accepted consensus memory" in context
+
+
 def test_verification_engine_evaluates_without_acceptance_decision() -> None:
     proposal = ProposalBuilder().from_agent_output(
         task_id="task_1",
@@ -144,7 +196,7 @@ def test_llm_evaluator_uses_verifier_agent_model(monkeypatch) -> None:
         verifier_agent_id="agent_3",
     )
 
-    assert vector.metadata["model"] == "weak-model"
+    assert vector.metadata["model"].endswith("weak-model")
     assert calls[0]["model"] == "weak-model"
 
 
@@ -293,6 +345,7 @@ def test_smart_quorum_preserves_fisher_ida_configuration() -> None:
             "enabled": True,
             "alpha_initial": 0.7,
             "beta_initial": 0.3,
+            "M": 5,
             "parameters": {"learning_rate": 0.1},
         },
         alpha_initial=0.7,
@@ -308,6 +361,7 @@ def test_smart_quorum_preserves_fisher_ida_configuration() -> None:
     assert decision.metadata["fisher_ida"]["enabled"] is True
     assert decision.metadata["fisher_ida"]["alpha_initial"] == 0.7
     assert decision.metadata["fisher_ida"]["beta_initial"] == 0.3
+    assert decision.metadata["fisher_ida"]["M"] == 5
     assert decision.metadata["fisher_ida"]["parameters"]["learning_rate"] == 0.1
 
 

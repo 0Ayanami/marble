@@ -1,0 +1,5 @@
+default_model: qwen3.7-max-preview
+capability_coefficient: 8.96
+model_capability_coefficients:
+  qwen3.7-max-preview: 8.96
+

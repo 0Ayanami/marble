@@ -1,0 +1,58 @@
+experiment:
+  name: mab_groupchat_consensus_research
+  output_root: experiments
+  run_id: groupchat_consensus
+
+agents:
+  total: 5
+  model: qwen3.7-max-preview
+  capability_coefficient: 8.96
+  model_capability_coefficients:
+    qwen3.7-max-preview: 8.96
+  num_byzantine: 0
+
+collaboration:
+  mode: groupchat
+  rounds: 1
+  max_tokens: 384
+  temperature: 0.0
+  options:
+    use_agent_act: true
+
+proposal:
+  enabled: true
+  builder_enabled: true
+  verification_enabled: true
+  weight_manager_enabled: true
+  max_rounds: 1
+  include_proposer_as_verifier: false
+  verification:
+    type: llm
+    fallback_to_heuristic: true
+  consensus:
+    strategy: smart_quorum
+    threshold: 0.5
+    confidence_threshold: 0.6
+    alpha: 0.6
+    beta: 0.4
+    use_dynamic_estimate: false
+  fisher_ida:
+    enabled: false
+    alpha_initial: 0.6
+    beta_initial: 0.4
+    M: 1
+
+benchmark:
+  type: multiagentbench
+  environment: research
+  dataset: multiagentbench/research/research_main.jsonl
+  task_id: 1-10
+  output_dir: experiments/groupchat_consensus
+  defaults:
+    coordinate_mode: graph
+  options:
+    evaluate_kpi: true
+
+sweep:
+  agent_counts: [5, 7]
+

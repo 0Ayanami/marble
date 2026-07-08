@@ -1,0 +1,15 @@
+strategy: smart_quorum
+threshold: 0.5
+confidence_threshold: 0.6
+alpha: 0.6
+beta: 0.4
+use_dynamic_estimate: false
+verification:
+  type: llm
+  fallback_to_heuristic: true
+fisher_ida:
+  enabled: false
+  alpha_initial: 0.6
+  beta_initial: 0.4
+  M: 1
+

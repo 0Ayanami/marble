@@ -228,4 +228,5 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         metadata.setdefault("enabled", False)
         metadata.setdefault("alpha_initial", self.alpha_initial)
         metadata.setdefault("beta_initial", self.beta_initial)
+        metadata.setdefault("M", 1)
         return metadata
