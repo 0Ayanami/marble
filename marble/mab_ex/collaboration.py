@@ -1,11 +1,10 @@
-"""Configurable collaboration modes for MultiAgentBench proposal generation."""
+"""Configurable collaboration adapters for MultiAgentBench experiments."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Type
 
-from marble.llms.model_prompting import model_prompting
 from marble.mab_ex.config import CollaborationExperimentConfig
 
 
@@ -36,6 +35,7 @@ class CollaborationMode:
     """Interface for pre-consensus collaboration strategies."""
 
     name: str
+    coordinate_mode: str
 
     def run(
         self,
@@ -45,106 +45,60 @@ class CollaborationMode:
         round_index: int,
     ) -> CollaborationRunResult:
         """Generate per-agent outputs for a proposal round."""
-        raise NotImplementedError
+        static_result = self._static_result(
+            engine=engine,
+            config=config,
+            round_index=round_index,
+        )
+        if static_result is not None:
+            return static_result
 
+        engine.current_iteration = 0
+        engine.coordinate_mode = self.coordinate_mode
+        engine.config.coordination_mode = self.coordinate_mode
+        if self.coordinate_mode == "groupchat":
+            engine.groupchat_coordinate()
+        elif self.coordinate_mode == "role_based":
+            engine.role_based_coordinate()
+        else:
+            raise ValueError(f"Unsupported collaboration coordinate mode: {self.name}")
 
-def _agent_label(agent: Any) -> str:
-    return f"{agent.agent_id}: {getattr(agent, 'profile', '')}"
+        summary = getattr(engine, "last_run_result", {}) or {}
+        agent_outputs = _extract_agent_outputs(summary)
+        transcript = str(summary.get("group_transcript", ""))
+        events = _events_from_summary(
+            summary=summary,
+            mode=self.name,
+            round_index=round_index,
+        )
+        estimated_tokens = estimate_tokens(
+            transcript,
+            *[str(output) for output in agent_outputs.values()],
+        )
+        return CollaborationRunResult(
+            agent_outputs=agent_outputs,
+            transcript=transcript,
+            events=events,
+            estimated_tokens=estimated_tokens,
+        )
 
-
-def _peer_descriptions(agent: Any, agents: List[Any]) -> List[str]:
-    return [_agent_label(peer) for peer in agents if peer.agent_id != agent.agent_id]
-
-
-def _static_output(
-    config: CollaborationExperimentConfig,
-    agent_id: str,
-) -> Optional[str]:
-    static_outputs = config.options.get("static_agent_outputs", {})
-    if not isinstance(static_outputs, dict) or agent_id not in static_outputs:
-        return None
-    return "Result from the model:" + str(static_outputs[agent_id]) + "\n"
-
-
-def _message_content(message: Any) -> str:
-    return str(getattr(message, "content", "") or "")
-
-
-def _build_proposal_prompt(
-    *,
-    agent: Any,
-    task: str,
-    agents: List[Any],
-    transcript: str = "",
-    mode_name: str,
-) -> str:
-    transcript_section = (
-        f"\n\nShared {mode_name} transcript:\n{transcript}\n" if transcript else ""
-    )
-    return (
-        f"You are {agent.agent_id}: {getattr(agent, 'profile', '')}\n"
-        f"Task: {task}\n"
-        f"Other agents: {_peer_descriptions(agent, agents)}\n"
-        f"{transcript_section}\n"
-        "Propose one concise memory entry for this task. The memory should be "
-        "verifiable, useful, safe, and suitable for the configured MARBLE "
-        "proposal consensus workflow. Return only the proposed memory content."
-    )
-
-
-class RoleBasedCollaborationMode:
-    """Role-based proposal generation using existing MARBLE agents/profiles."""
-
-    name = "role_based"
-
-    def run(
+    def _static_result(
         self,
         *,
         engine: Any,
         config: CollaborationExperimentConfig,
         round_index: int,
-    ) -> CollaborationRunResult:
-        agents = engine.graph.get_all_agents()
+    ) -> Optional[CollaborationRunResult]:
+        static_outputs = config.options.get("static_agent_outputs", {})
+        if not isinstance(static_outputs, dict) or not static_outputs:
+            return None
+
         agent_outputs: Dict[str, str] = {}
         events: List[Dict[str, Any]] = []
-        estimated_tokens = 0
-        for agent in agents:
-            static = _static_output(config, agent.agent_id)
-            if static is not None:
-                output = static
-            elif config.options.get("use_agent_act", True):
-                output, communication = agent.act(engine.task)
-                if communication:
-                    events.append(
-                        {
-                            "round": round_index + 1,
-                            "phase": "communication",
-                            "mode": self.name,
-                            "agent_id": agent.agent_id,
-                            "message": communication,
-                        }
-                    )
-            else:
-                prompt = _build_proposal_prompt(
-                    agent=agent,
-                    task=engine.task,
-                    agents=agents,
-                    mode_name=self.name,
-                )
-                response = model_prompting(
-                    llm_model=agent.llm,
-                    messages=[{"role": "user", "content": prompt}],
-                    return_num=1,
-                    max_token_num=config.max_tokens,
-                    temperature=config.temperature,
-                    top_p=None,
-                    stream=None,
-                )[0]
-                content = _message_content(response)
-                output = "Result from the model:" + content + "\n"
-                estimated_tokens += estimate_tokens(prompt, content)
-
-            estimated_tokens += estimate_tokens(output)
+        for agent in engine.graph.get_all_agents():
+            if agent.agent_id not in static_outputs:
+                continue
+            output = "Result from the model:" + str(static_outputs[agent.agent_id]) + "\n"
             agent_outputs[agent.agent_id] = output
             events.append(
                 {
@@ -157,148 +111,99 @@ class RoleBasedCollaborationMode:
             )
         return CollaborationRunResult(
             agent_outputs=agent_outputs,
+            transcript="\n".join(
+                f"{agent_id}: {output}" for agent_id, output in agent_outputs.items()
+            ),
             events=events,
-            estimated_tokens=estimated_tokens,
+            estimated_tokens=estimate_tokens(*agent_outputs.values()),
         )
 
 
-class MultiAgentDiscussionMode:
-    """M.A.D. mode: shared discussion transcript before proposal generation."""
+class RoleBasedCollaborationMode(CollaborationMode):
+    """Role-based proposal generation through Engine.role_based_coordinate."""
 
-    name = "mad"
+    name = "role_based"
+    coordinate_mode = "role_based"
 
-    def run(
-        self,
-        *,
-        engine: Any,
-        config: CollaborationExperimentConfig,
-        round_index: int,
-    ) -> CollaborationRunResult:
-        agents = engine.graph.get_all_agents()
-        transcript_lines: List[str] = []
-        events: List[Dict[str, Any]] = []
-        estimated_tokens = 0
-        for discussion_round in range(config.rounds):
-            transcript = "\n".join(transcript_lines)
-            for agent in agents:
-                prompt = self._build_discussion_prompt(
-                    agent=agent,
-                    task=engine.task,
-                    agents=agents,
-                    transcript=transcript,
-                    proposal_round=round_index,
-                    discussion_round=discussion_round,
-                )
-                response = model_prompting(
-                    llm_model=agent.llm,
-                    messages=[{"role": "user", "content": prompt}],
-                    return_num=1,
-                    max_token_num=config.max_tokens,
-                    temperature=config.temperature,
-                    top_p=None,
-                    stream=None,
-                )[0]
-                message = _message_content(response)
-                estimated_tokens += estimate_tokens(prompt, message)
-                transcript_line = f"{agent.agent_id}: {message}"
-                transcript_lines.append(transcript_line)
+
+class GroupchatCollaborationMode(CollaborationMode):
+    """Shared transcript generation through Engine.groupchat_coordinate."""
+
+    name = "groupchat"
+    coordinate_mode = "groupchat"
+
+
+def _extract_agent_outputs(summary: Dict[str, Any]) -> Dict[str, str]:
+    direct_outputs = summary.get("agent_outputs")
+    if isinstance(direct_outputs, dict):
+        return {
+            str(agent_id): str(output)
+            for agent_id, output in direct_outputs.items()
+            if output is not None
+        }
+
+    outputs: Dict[str, str] = {}
+    iterations = summary.get("iterations", [])
+    if not isinstance(iterations, list):
+        return outputs
+    for iteration in iterations:
+        if not isinstance(iteration, dict):
+            continue
+        task_results = iteration.get("task_results", [])
+        if not isinstance(task_results, list):
+            continue
+        for item in task_results:
+            if not isinstance(item, dict):
+                continue
+            if "agent_id" in item and "result" in item:
+                outputs[str(item["agent_id"])] = str(item["result"])
+                continue
+            for agent_id, result in item.items():
+                outputs[str(agent_id)] = str(result)
+    return outputs
+
+
+def _events_from_summary(
+    *,
+    summary: Dict[str, Any],
+    mode: str,
+    round_index: int,
+) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    iterations = summary.get("iterations", [])
+    if not isinstance(iterations, list):
+        return events
+    for iteration in iterations:
+        if not isinstance(iteration, dict):
+            continue
+        task_results = iteration.get("task_results", [])
+        if not isinstance(task_results, list):
+            continue
+        for item in task_results:
+            if not isinstance(item, dict):
+                continue
+            if "agent_id" in item and "result" in item:
                 events.append(
                     {
                         "round": round_index + 1,
-                        "discussion_round": discussion_round + 1,
-                        "phase": "discussion",
-                        "mode": self.name,
-                        "agent_id": agent.agent_id,
-                        "message": message,
+                        "phase": "proposal",
+                        "mode": mode,
+                        "agent_id": str(item["agent_id"]),
+                        "message": str(item["result"]),
                     }
                 )
-
-        transcript = "\n".join(transcript_lines)
-        agent_outputs: Dict[str, str] = {}
-        proposal_events: List[Dict[str, Any]] = []
-        for agent in agents:
-            static = _static_output(config, agent.agent_id)
-            if static is not None:
-                output = static
-            elif config.options.get("use_agent_act", True):
-                proposal_task = (
-                    f"{engine.task}\n\n"
-                    f"Shared Multi-Agent Discussion transcript:\n{transcript}\n\n"
-                    "Based on the discussion, propose one concise memory entry "
-                    "that is verifiable, useful, and safe."
+                continue
+            for agent_id, result in item.items():
+                events.append(
+                    {
+                        "round": round_index + 1,
+                        "phase": "proposal",
+                        "mode": mode,
+                        "agent_id": str(agent_id),
+                        "message": str(result),
+                    }
                 )
-                output, communication = agent.act(proposal_task)
-                if communication:
-                    proposal_events.append(
-                        {
-                            "round": round_index + 1,
-                            "phase": "communication",
-                            "mode": self.name,
-                            "agent_id": agent.agent_id,
-                            "message": communication,
-                        }
-                    )
-            else:
-                prompt = _build_proposal_prompt(
-                    agent=agent,
-                    task=engine.task,
-                    agents=agents,
-                    transcript=transcript,
-                    mode_name=self.name,
-                )
-                response = model_prompting(
-                    llm_model=agent.llm,
-                    messages=[{"role": "user", "content": prompt}],
-                    return_num=1,
-                    max_token_num=config.max_tokens,
-                    temperature=config.temperature,
-                    top_p=None,
-                    stream=None,
-                )[0]
-                content = _message_content(response)
-                output = "Result from the model:" + content + "\n"
-                estimated_tokens += estimate_tokens(prompt, content)
-            estimated_tokens += estimate_tokens(output)
-            agent_outputs[agent.agent_id] = output
-            proposal_events.append(
-                {
-                    "round": round_index + 1,
-                    "phase": "proposal",
-                    "mode": self.name,
-                    "agent_id": agent.agent_id,
-                    "message": output,
-                }
-            )
-
-        return CollaborationRunResult(
-            agent_outputs=agent_outputs,
-            transcript=transcript,
-            events=events + proposal_events,
-            estimated_tokens=estimated_tokens,
-        )
-
-    def _build_discussion_prompt(
-        self,
-        *,
-        agent: Any,
-        task: str,
-        agents: List[Any],
-        transcript: str,
-        proposal_round: int,
-        discussion_round: int,
-    ) -> str:
-        return (
-            f"You are {agent.agent_id}: {getattr(agent, 'profile', '')}\n"
-            f"Task: {task}\n"
-            f"Other agents: {_peer_descriptions(agent, agents)}\n"
-            f"Proposal round: {proposal_round + 1}\n"
-            f"Discussion round: {discussion_round + 1}\n\n"
-            f"Current shared transcript:\n{transcript or '(empty)'}\n\n"
-            "Participate in a structured Multi-Agent Discussion. Add one concise "
-            "contribution that helps the group build useful, verifiable, and safe "
-            "memory proposals later. Do not produce a final memory proposal yet. "
-            "Return only your next message to the group in at most 80 words."
-        )
+    return events
 
 
 class CollaborationModeRegistry:
@@ -330,7 +235,7 @@ COLLABORATION_MODES = CollaborationModeRegistry()
 COLLABORATION_MODES.register("role_based", RoleBasedCollaborationMode)
 COLLABORATION_MODES.register("magentic_one", RoleBasedCollaborationMode)
 COLLABORATION_MODES.register("direct", RoleBasedCollaborationMode)
-COLLABORATION_MODES.register("mad", MultiAgentDiscussionMode)
-COLLABORATION_MODES.register("groupchat", MultiAgentDiscussionMode)
-COLLABORATION_MODES.register("selector_groupchat", MultiAgentDiscussionMode)
-COLLABORATION_MODES.register("multi_agent_discussion", MultiAgentDiscussionMode)
+COLLABORATION_MODES.register("groupchat", GroupchatCollaborationMode)
+COLLABORATION_MODES.register("mad", GroupchatCollaborationMode)
+COLLABORATION_MODES.register("selector_groupchat", GroupchatCollaborationMode)
+COLLABORATION_MODES.register("multi_agent_discussion", GroupchatCollaborationMode)

@@ -110,8 +110,15 @@ def build_environment_config(
     environment_name: str,
     raw_environment: Mapping[str, Any],
     defaults: Mapping[str, Any],
+    smoke: bool = False,
 ) -> Dict[str, Any]:
     """Build a MARBLE engine environment config from a MAB environment name."""
+    if smoke:
+        raw = dict(raw_environment)
+        raw["type"] = "Base"
+        raw.setdefault("name", f"{environment_name} Smoke Environment")
+        raw.setdefault("max_iterations", 1)
+        return _merge_empty(raw, defaults)
     return ENVIRONMENT_ADAPTERS.create(environment_name).build_config(
         raw_environment=raw_environment,
         defaults=defaults,

@@ -7,8 +7,10 @@ from typing import Dict, Iterable, Mapping, Optional, Sequence, Set
 from marble.consensus.majority_vote import MajorityVoteConsensus
 from marble.consensus.models import (
     ConsensusDecision,
+    ConsensusResult,
     ConsensusVote,
     MemoryProposal,
+    VERIFICATION_DIMENSIONS,
     VerificationVector,
 )
 
@@ -27,7 +29,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         epsilon_ratio: float = 0.1,
         epsilon: Optional[float] = None,
         use_dynamic_estimate: bool = False,
-        fisher_ida: Optional[Mapping[str, object]] = None,
+        
+        fisher_lda: Optional[Mapping[str, object]] = None,
         alpha_initial: float = 0.6,
         beta_initial: float = 0.4,
 
@@ -61,7 +64,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         self.epsilon_ratio = float(epsilon_ratio)
         self.epsilon = None if epsilon is None else float(epsilon)
         self.use_dynamic_estimate = use_dynamic_estimate
-        self.fisher_ida = dict(fisher_ida or {})
+        self.fisher_lda = dict(fisher_lda or {})
         self.alpha_initial = float(alpha_initial)
         self.beta_initial = float(beta_initial)
 
@@ -89,6 +92,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         verifications: Iterable[VerificationVector],
     ) -> ConsensusDecision:
         votes = [self.build_vote(proposal, vector) for vector in verifications]
+        multi_verification = self._weighted_dimension_summary(votes)
         accept_count = sum(1 for vote in votes if vote.accept)
         reject_count = len(votes) - accept_count
         total_weight = sum(vote.weight for vote in votes)
@@ -97,6 +101,11 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         quorum = self.calculate_quorum(votes)
 
         if len(votes) < self.minimum_votes:
+            consensus_result = ConsensusResult(
+                total_weight=total_weight,
+                vote_weight=accept_weight,
+                result="pending",
+            )
             return ConsensusDecision(
                 proposal_id=proposal.proposal_id,
                 result="pending",
@@ -113,10 +122,12 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                     "reason": "minimum_votes_not_met",
                     "proposal_confidence_score": 0.0,
                     "proposal_confidence_method": "weighted_by_agent_weight",
-                    "fisher_ida": self.fisher_ida_metadata(),
+                    "fisher_lda": self.fisher_lda_metadata(),
                     "agent_weights": dict(self.agent_weights),
                     "honest_agents": sorted(self.honest_agents),
                     "byzantine_agents": sorted(self.byzantine_agents),
+                    "multi_verification_summary": multi_verification,
+                    "consensus_result": consensus_result.to_dict(),
                     **quorum,
                 },
             )
@@ -129,6 +140,11 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         passed = has_quorum_certificate and has_weighted_majority
         proposal_confidence_score = (
             self._weighted_confidence(votes) if passed else 0.0
+        )
+        consensus_result = ConsensusResult(
+            total_weight=total_weight,
+            vote_weight=accept_weight,
+            result="pass" if passed else "fail",
         )
 
         return ConsensusDecision(
@@ -152,6 +168,8 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),
+                "multi_verification_summary": multi_verification,
+                "consensus_result": consensus_result.to_dict(),
                 **quorum,
             },
         )
@@ -222,9 +240,27 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
             / total_weight
         )
 
-    def fisher_ida_metadata(self) -> Dict[str, object]:
-        """Return reserved Fisher-IDA optimizer settings for traces."""
-        metadata = dict(self.fisher_ida)
+    def _weighted_dimension_summary(
+        self,
+        votes: Sequence[ConsensusVote],
+    ) -> Dict[str, float]:
+        total_weight = sum(max(vote.weight, 0.0) for vote in votes)
+        if total_weight <= 0.0:
+            return {dimension: 0.0 for dimension in VERIFICATION_DIMENSIONS}
+        return {
+            dimension: (
+                sum(
+                    getattr(vote.verification, dimension) * max(vote.weight, 0.0)
+                    for vote in votes
+                )
+                / total_weight
+            )
+            for dimension in VERIFICATION_DIMENSIONS
+        }
+
+    def fisher_lda_metadata(self) -> Dict[str, object]:
+        """Return reserved Fisher-LDA optimizer settings for traces."""
+        metadata = dict(self.fisher_lda)
         metadata.setdefault("enabled", False)
         metadata.setdefault("alpha_initial", self.alpha_initial)
         metadata.setdefault("beta_initial", self.beta_initial)

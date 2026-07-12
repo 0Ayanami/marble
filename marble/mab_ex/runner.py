@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,6 +85,11 @@ class ExperimentRunner:
 
     def run(self) -> ExperimentRunResult:
         start = time.perf_counter()
+        if self.config.experiment.seed is not None:
+            random.seed(int(self.config.experiment.seed))
+        logging.getLogger().setLevel(
+            getattr(logging, self.config.experiment.log_level, logging.INFO)
+        )
         writer = ExperimentResultWriter(self.config)
         writer.save_config()
         os.environ["MARBLE_LOG_PATH"] = str(writer.paths.logs_dir / "app.log")
@@ -110,46 +117,50 @@ class ExperimentRunner:
         }
         total_estimated_tokens = 0
         committed_memory: List[Dict[str, Any]] = []
-        if self.config.proposal.enabled:
-            proposal_records, total_estimated_tokens, trace_metrics = self._run_proposals(
-                engine=engine,
-                case_task_id=case.task_id,
-                collaboration_mode=collaboration_mode,
-            )
-            if isinstance(engine.memory, ConsensusMemory):
-                committed_memory = [
-                    proposal.to_dict()
-                    for proposal in engine.memory.retrieve_committed(
-                        task_id=case.task_id
-                    )
+        launched_environment = self._launch_external_environment(engine)
+        try:
+            if self.config.proposal.enabled:
+                proposal_records, total_estimated_tokens, trace_metrics = self._run_proposals(
+                    engine=engine,
+                    case_task_id=case.task_id,
+                    collaboration_mode=collaboration_mode,
+                )
+                if isinstance(engine.memory, ConsensusMemory):
+                    committed_memory = [
+                        proposal.to_dict()
+                        for proposal in engine.memory.retrieve_committed(
+                            task_id=case.task_id
+                        )
+                    ]
+            else:
+                collaboration_start = time.perf_counter()
+                collaboration_result = collaboration_mode.run(
+                    engine=engine,
+                    config=self.config.collaboration,
+                    round_index=0,
+                )
+                collaboration_seconds = time.perf_counter() - collaboration_start
+                trace_metrics["collaboration_seconds"] = collaboration_seconds
+                trace_metrics["rounds"].append(
+                    {
+                        "round": 1,
+                        "collaboration_seconds": collaboration_seconds,
+                        "consensus_seconds": 0.0,
+                        "agent_output_count": len(collaboration_result.agent_outputs),
+                    }
+                )
+                total_estimated_tokens = collaboration_result.estimated_tokens
+                proposal_records = [
+                    {
+                        "round": 1,
+                        "proposal_enabled": False,
+                        "agent_outputs": collaboration_result.agent_outputs,
+                        "collaboration": collaboration_result.to_dict(),
+                        "collaboration_events": collaboration_result.events,
+                    }
                 ]
-        else:
-            collaboration_start = time.perf_counter()
-            collaboration_result = collaboration_mode.run(
-                engine=engine,
-                config=self.config.collaboration,
-                round_index=0,
-            )
-            collaboration_seconds = time.perf_counter() - collaboration_start
-            trace_metrics["collaboration_seconds"] = collaboration_seconds
-            trace_metrics["rounds"].append(
-                {
-                    "round": 1,
-                    "collaboration_seconds": collaboration_seconds,
-                    "consensus_seconds": 0.0,
-                    "agent_output_count": len(collaboration_result.agent_outputs),
-                }
-            )
-            total_estimated_tokens = collaboration_result.estimated_tokens
-            proposal_records = [
-                {
-                    "round": 1,
-                    "proposal_enabled": False,
-                    "agent_outputs": collaboration_result.agent_outputs,
-                    "collaboration": collaboration_result.to_dict(),
-                    "collaboration_events": collaboration_result.events,
-                }
-            ]
+        finally:
+            self._finish_external_environment(engine, launched_environment)
 
         engine.evaluator.metrics["task_completion"].append(
             1 if committed_memory or not self.config.proposal.enabled else 0
@@ -170,6 +181,7 @@ class ExperimentRunner:
         )
         benchmark_result["paths"] = writer.paths.to_dict()
         benchmark_result["experiment_name"] = self.config.experiment.name
+        benchmark_result["experiment_group"] = self._experiment_group()
         benchmark_result["agent_count"] = self.config.agents.total
 
         metrics = benchmark_result["standard_metrics"]
@@ -309,6 +321,7 @@ class ExperimentRunner:
     ) -> Dict[str, Any]:
         return {
             "experiment_name": self.config.experiment.name,
+            "experiment_group": self._experiment_group(),
             "task_id": benchmark_result.get("task_id"),
             "environment": self.config.benchmark.environment,
             "workflow": self.config.collaboration.mode,
@@ -322,6 +335,24 @@ class ExperimentRunner:
             "committed_count": benchmark_result.get("committed_count"),
             "runtime_seconds": benchmark_result.get("runtime_seconds"),
         }
+
+    def _experiment_group(self) -> str:
+        if self.config.experiment.group:
+            return str(self.config.experiment.group)
+        workflow = self.config.collaboration.mode
+        if self.config.proposal.enabled:
+            return f"{workflow}_consensus"
+        return workflow
+
+    def _launch_external_environment(self, engine: Engine) -> bool:
+        if getattr(engine, "_environment_is")("MinecraftEnvironment"):
+            engine.environment.launch()
+            return True
+        return False
+
+    def _finish_external_environment(self, engine: Engine, launched: bool) -> None:
+        if launched:
+            engine.environment.finish()
 
 
 class ExperimentSweepRunner:
@@ -520,6 +551,14 @@ class ExperimentSweepRunner:
         )
         payload = {
             "experiment_name": self.config.experiment.name,
+            "experiment_group": (
+                self.config.experiment.group
+                or (
+                    f"{self.config.collaboration.mode}_consensus"
+                    if self.config.proposal.enabled
+                    else self.config.collaboration.mode
+                )
+            ),
             "environment": self.config.benchmark.environment,
             "workflow": self.config.collaboration.mode,
             "consensus": self.config.proposal.enabled,
@@ -552,7 +591,8 @@ class ExperimentSweepRunner:
 
     def _config_without_task_id(self) -> ExperimentConfig:
         data = copy.deepcopy(self.config.to_dict())
-        data["benchmark"]["task_id"] = None
+        benchmark_config = data.setdefault("benchmark", {}).setdefault("config", {})
+        benchmark_config["task_id"] = None
         return ExperimentConfig.from_dict(data)
 
 
@@ -568,17 +608,29 @@ class AgentCountSweepRunner:
 
     def run(self) -> AgentCountSweepResult:
         counts = self.config.sweep.agent_counts or [self.config.agents.total]
+        byzantine_counts = (
+            self.config.sweep.byzantine_counts
+            or [self.config.agents.num_byzantine]
+        )
         results: List[Dict[str, Any]] = []
         for count in counts:
-            count_config = self.config.with_agent_count(count)
-            sweep = ExperimentSweepRunner(count_config).run_all_cases()
-            results.append(
-                {
-                    "agent_number": count,
-                    "sweep_dir": str(sweep.sweep_dir),
-                    "summary_path": str(sweep.summary_path),
-                    "metrics_path": str(sweep.metrics_path),
-                    "metrics": sweep.metrics,
-                }
-            )
+            for byzantine_count in byzantine_counts:
+                if byzantine_count > count:
+                    continue
+                count_config = (
+                    self.config
+                    .with_agent_count(count)
+                    .with_byzantine_count(byzantine_count)
+                )
+                sweep = ExperimentSweepRunner(count_config).run_all_cases()
+                results.append(
+                    {
+                        "agent_number": count,
+                        "byzantine_agent_number": byzantine_count,
+                        "sweep_dir": str(sweep.sweep_dir),
+                        "summary_path": str(sweep.summary_path),
+                        "metrics_path": str(sweep.metrics_path),
+                        "metrics": sweep.metrics,
+                    }
+                )
         return AgentCountSweepResult(results=results)

@@ -48,6 +48,11 @@ def standardize_task_metrics(
         "completion_rate": completion_rate,
         "task_score": task_score,
     }
+    effectiveness = result.get("effectiveness") or {}
+    if isinstance(effectiveness, Mapping):
+        kpi_score = effectiveness.get("kpi_accomplishment_ratio")
+        if kpi_score is not None:
+            metric_values["kpi_accomplishment_ratio"] = _as_float(kpi_score)
     records = [
         {
             "task_id": str(task_id),

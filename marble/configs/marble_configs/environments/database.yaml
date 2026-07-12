@@ -1,6 +1,0 @@
-name: database
-runnable: false
-marble_type: DB
-display_name: Database Environment
-dataset: null
-

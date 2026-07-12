@@ -1,7 +1,0 @@
-name: research
-runnable: true
-marble_type: Research
-display_name: Research Collaboration Environment
-dataset: multiagentbench/research/research_main.jsonl
-task_id: 1-10
-

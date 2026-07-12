@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -98,11 +99,128 @@ def _base_experiment_config(output_root: Path) -> dict:
     }
 
 
-def test_experiment_config_requires_byzantine_disabled(tmp_path: Path) -> None:
+def test_experiment_config_supports_byzantine_model_groups(tmp_path: Path) -> None:
     data = _base_experiment_config(tmp_path)
     data["agents"]["num_byzantine"] = 1
+    data["agents"]["models"] = {
+        "honest": "honest-model",
+        "byzantine": "byzantine-model",
+    }
+    data["agents"]["model_capability_coefficients"] = {
+        "honest-model": 8.96,
+        "byzantine-model": 2.0,
+    }
+    data["proposal"]["consensus"]["strategy"] = "smart_quorum"
 
-    with pytest.raises(ValueError, match="num_byzantine = 0"):
+    config = ExperimentConfig.from_dict(data)
+    adapter = BENCHMARK_ADAPTERS.create(config.benchmark.type)
+    case = adapter.load_case(config)
+    engine_config = adapter.build_engine_config(
+        case=case,
+        config=config,
+        proposal_output_path=tmp_path / "proposal_result.jsonl",
+    )
+
+    llms = {str(agent["agent_id"]): agent["llm"] for agent in engine_config.agents}
+    roles = {
+        str(agent["agent_id"]): agent["consensus_role"]
+        for agent in engine_config.agents
+    }
+    algorithm = engine_config.consensus["algorithm"]
+
+    assert llms == {
+        "agent1": "honest-model",
+        "agent2": "honest-model",
+        "agent3": "byzantine-model",
+    }
+    assert roles["agent3"] == "byzantine"
+    assert algorithm["honest_agents"] == ["agent1", "agent2"]
+    assert algorithm["byzantine_agents"] == ["agent3"]
+    assert algorithm["agent_weights"]["agent1"] == 8.96
+    assert algorithm["agent_weights"]["agent3"] == 2.0
+
+
+def test_experiment_config_loads_benchmark_config_path_and_consensus_switch(
+    tmp_path: Path,
+) -> None:
+    data = _base_experiment_config(tmp_path)
+    benchmark_config_path = tmp_path / "benchmark.yaml"
+    inline_task = data["benchmark"].pop("inline_task")
+    benchmark_config_path.write_text(
+        yaml.safe_dump(
+            {
+                "environment": "research",
+                "inline_task": inline_task,
+                "task_id": 7,
+                "options": {"evaluate_kpi": True},
+                "metrics": {"effectiveness": ["KPI"]},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    data["benchmark"] = {
+        "type": "multiagentbench",
+        "config_path": str(benchmark_config_path),
+        "output_dir": str(tmp_path / "runs"),
+    }
+    data["consensus"] = {"enabled": False}
+    data["proposal"].pop("enabled", None)
+
+    config = ExperimentConfig.from_dict(data)
+
+    assert config.proposal.enabled is False
+    assert config.benchmark.environment == "research"
+    assert config.benchmark.task_id == 7
+    assert config.benchmark.options["evaluate_kpi"] is True
+    assert config.benchmark.metrics["effectiveness"] == ["KPI"]
+
+
+def test_benchmark_metrics_kpi_request_enables_kpi_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_model_prompting(**_: object) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                content=json.dumps(
+                    [
+                        {
+                            "milestone": "safe consensus benchmark drafted",
+                            "agents": ["agent1", "agent2"],
+                        }
+                    ]
+                )
+            )
+        ]
+
+    monkeypatch.setattr("marble.evaluator.evaluator.model_prompting", fake_model_prompting)
+    config_data = _base_experiment_config(tmp_path)
+    config_data["benchmark"]["options"] = {"evaluate_kpi": False}
+    config_data["benchmark"]["metrics"] = {"effectiveness": ["KPI"]}
+    config = ExperimentConfig.from_dict(config_data)
+
+    result = ExperimentRunner(config).run()
+    benchmark_result = json.loads(
+        result.paths.benchmark_result_path.read_text(encoding="utf-8")
+    )
+
+    assert benchmark_result["effectiveness"]["metric"] == "KPI"
+    assert benchmark_result["kpi_requested"] is True
+    assert benchmark_result["kpi_evaluated"] is True
+    assert benchmark_result["effectiveness"]["kpi_evaluation_count"] == 1
+    assert benchmark_result["effectiveness"]["kpi_status"] == "evaluated"
+    assert benchmark_result["effectiveness"]["total_milestones_M"] == 1
+    assert benchmark_result["effectiveness"]["kpi_accomplishment_ratio"] == 1.0
+
+
+def test_experiment_config_rejects_too_many_byzantine_agents(
+    tmp_path: Path,
+) -> None:
+    data = _base_experiment_config(tmp_path)
+    data["agents"]["num_byzantine"] = 4
+
+    with pytest.raises(ValueError, match="cannot exceed"):
         ExperimentConfig.from_dict(data)
 
 
@@ -185,6 +303,86 @@ def test_benchmark_adapter_assigns_models_and_capabilities(
     assert weights["agent1"] == 8.96
     assert weights["agent2"] == 9.5
     assert weights["agent3"] == 8.96
+
+
+def test_benchmark_adapter_maps_collaboration_modes_to_engine_coordinates(
+    tmp_path: Path,
+) -> None:
+    config_data = _base_experiment_config(tmp_path)
+    config = ExperimentConfig.from_dict(config_data)
+    adapter = BENCHMARK_ADAPTERS.create(config.benchmark.type)
+    case = adapter.load_case(config)
+
+    role_engine_config = adapter.build_engine_config(
+        case=case,
+        config=config,
+        proposal_output_path=tmp_path / "role_result.jsonl",
+    )
+
+    assert role_engine_config.coordination_mode == "role_based"
+    assert role_engine_config.engine_planner["role_based"]["base_mode"] == "tree"
+    assert any(
+        relationship[2] == "parent"
+        for relationship in role_engine_config.relationships
+    )
+
+    config_data["collaboration"]["mode"] = "groupchat"
+    config_data["collaboration"]["rounds"] = 2
+    groupchat_config = ExperimentConfig.from_dict(config_data)
+    groupchat_case = adapter.load_case(groupchat_config)
+    groupchat_engine_config = adapter.build_engine_config(
+        case=groupchat_case,
+        config=groupchat_config,
+        proposal_output_path=tmp_path / "groupchat_result.jsonl",
+    )
+
+    assert groupchat_engine_config.coordination_mode == "groupchat"
+    assert groupchat_engine_config.engine_planner["groupchat"]["rounds"] == 2
+
+
+def test_consensus_and_weight_manager_defaults_are_configured(
+    tmp_path: Path,
+) -> None:
+    config_data = _base_experiment_config(tmp_path)
+    config_data["proposal"]["consensus"]["strategy"] = "smart_quorum"
+    config = ExperimentConfig.from_dict(config_data)
+    adapter = BENCHMARK_ADAPTERS.create(config.benchmark.type)
+    case = adapter.load_case(config)
+
+    engine_config = adapter.build_engine_config(
+        case=case,
+        config=config,
+        proposal_output_path=tmp_path / "proposal_result.jsonl",
+    )
+
+    algorithm = engine_config.consensus["algorithm"]
+    weight_manager = engine_config.consensus["weight_manager"]
+    assert algorithm["epsilon_ratio"] == 1
+    assert algorithm["epsilon"] is None
+    assert weight_manager == {
+        "alpha": 0.6,
+        "beta": 0.4,
+        "gamma": 5.0,
+        "theta": 0.5,
+        "proposal_window": 20,
+        "vote_window": 30,
+        "initial_vc": 0.5,
+        "initial_hc": 0.5,
+    }
+
+
+def test_legacy_consensus_alpha_beta_are_migrated_to_weight_manager(
+    tmp_path: Path,
+) -> None:
+    config_data = _base_experiment_config(tmp_path)
+    config_data["proposal"]["consensus"]["strategy"] = "smart_quorum"
+    config_data["proposal"]["consensus"]["alpha"] = 0.5
+    config_data["proposal"]["consensus"]["beta"] = 0.5
+
+    config = ExperimentConfig.from_dict(config_data)
+
+    assert config.proposal.weight_manager["alpha"] == 0.5
+    assert config.proposal.weight_manager["beta"] == 0.5
 
 
 def test_experiment_sweep_runner_saves_progress_summary_and_metrics(

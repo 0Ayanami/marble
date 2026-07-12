@@ -152,6 +152,14 @@ def _fully_connected_relationships(agent_ids: Iterable[str]) -> List[List[str]]:
     return relationships
 
 
+def _tree_parent_relationships(agent_ids: Iterable[str]) -> List[List[str]]:
+    ids = list(agent_ids)
+    if len(ids) <= 1:
+        return []
+    root = ids[0]
+    return [[root, child, "parent"] for child in ids[1:]]
+
+
 class MultiAgentBenchAdapter:
     """Adapter for MultiAgentBench JSONL/YAML task records."""
 
@@ -208,8 +216,9 @@ class MultiAgentBenchAdapter:
                     "runner or CLI --all-tasks for multi-task experiments."
                 )
             wanted = wanted_ids[0]
-            for record in records:
-                if str(record.get("task_id", record.get("id", ""))) == wanted:
+            for index, record in enumerate(records):
+                record_id = str(record.get("task_id", record.get("id", index + 1)))
+                if record_id == wanted:
                     selected = record
                     break
             if selected is None:
@@ -244,16 +253,31 @@ class MultiAgentBenchAdapter:
         )
         agent_configs = self._build_agents(raw, config)
         agent_ids = [str(agent["agent_id"]) for agent in agent_configs]
+        byzantine_agent_ids = self._byzantine_agent_ids(agent_ids, config)
+        honest_agent_ids = [
+            agent_id for agent_id in agent_ids if agent_id not in byzantine_agent_ids
+        ]
         agent_capability_coefficients = self._agent_capability_coefficients(
             agent_configs,
             config=config,
         )
-        relationships = self._build_relationships(raw, agent_ids)
+        collaboration_mode = str(config.collaboration.mode).replace("-", "_").lower()
+        role_base_mode = str(
+            config.collaboration.options.get("base_mode", "tree")
+        ).replace("-", "_").lower()
+        relationships = self._build_relationships(
+            raw,
+            agent_ids,
+            role_base_mode=role_base_mode
+            if collaboration_mode in {"role_based", "magentic_one", "direct"}
+            else None,
+        )
 
         environment = build_environment_config(
             environment_name=environment_name,
             raw_environment=raw.get("environment", {}),
             defaults=config.benchmark.defaults.get("environment", {}),
+            smoke=bool(config.benchmark.options.get("smoke", False)),
         )
 
         task = raw.get("task", {})
@@ -266,7 +290,7 @@ class MultiAgentBenchAdapter:
         metrics = raw.get("metrics", {})
         if not isinstance(metrics, dict):
             metrics = {}
-        metrics = dict(metrics)
+        metrics = {**config.benchmark.metrics, **dict(metrics)}
         if metrics.get("evaluate_llm") in (None, ""):
             metrics["evaluate_llm"] = config.agents.model
 
@@ -278,6 +302,9 @@ class MultiAgentBenchAdapter:
             memory["type"] = "ConsensusMemory"
         else:
             memory = _fill_empty_mapping(memory, {"type": "SharedMemory"})
+        memory["inject_shared_memory"] = config.memory.inject_shared_memory
+        if config.memory.max_shared_memory_items is not None:
+            memory["max_shared_memory_items"] = config.memory.max_shared_memory_items
 
         coordinate_mode = str(
             _first_non_empty(
@@ -286,6 +313,17 @@ class MultiAgentBenchAdapter:
                 "graph",
             )
         )
+        engine_planner = dict(raw.get("engine_planner", {}))
+        if collaboration_mode in {"groupchat", "mad", "selector_groupchat", "multi_agent_discussion"}:
+            coordinate_mode = "groupchat"
+            groupchat_config = dict(engine_planner.get("groupchat", {}))
+            groupchat_config.setdefault("rounds", max(1, int(config.collaboration.rounds)))
+            engine_planner["groupchat"] = groupchat_config
+        elif collaboration_mode in {"role_based", "magentic_one", "direct"}:
+            coordinate_mode = "role_based"
+            role_config = dict(engine_planner.get("role_based", {}))
+            role_config.setdefault("base_mode", role_base_mode)
+            engine_planner["role_based"] = role_config
 
         engine_data: Dict[str, Any] = {
             "environment": environment,
@@ -295,12 +333,14 @@ class MultiAgentBenchAdapter:
             "coordinate_mode": coordinate_mode,
             "task": task,
             "metrics": metrics,
-            "engine_planner": raw.get("engine_planner", {}),
+            "engine_planner": engine_planner,
             "llm": config.agents.model,
             "consensus": config.proposal.to_engine_consensus_config(
                 task_id=case.task_id,
                 agent_weights=agent_capability_coefficients,
                 agent_ids=agent_ids,
+                honest_agent_ids=honest_agent_ids,
+                byzantine_agent_ids=byzantine_agent_ids,
             ),
             "output": {
                 "file_path": str(proposal_output_path),
@@ -334,14 +374,20 @@ class MultiAgentBenchAdapter:
             final_answer = _final_answer_from_proposal_records(proposal_records)
             final_answer_source = "collaboration_outputs"
         kpi_error = None
-        if config.benchmark.options.get("evaluate_kpi", False):
+        kpi_requested = _benchmark_requests_kpi(config)
+        kpi_evaluated = False
+        if kpi_requested:
             try:
                 engine.evaluator.evaluate_kpi(engine.task, final_answer)
+                kpi_evaluated = True
             except Exception as exc:  # pragma: no cover - provider/runtime dependent
                 kpi_error = str(exc)
         evaluator_metrics = engine.evaluator.get_metrics()
         effectiveness = _effectiveness_metrics(
             engine.evaluator.metrics,
+            kpi_requested=kpi_requested,
+            kpi_evaluated=kpi_evaluated,
+            requested_metrics=config.benchmark.metrics,
             kpi_error=kpi_error,
         )
         efficiency = _efficiency_metrics(
@@ -358,6 +404,14 @@ class MultiAgentBenchAdapter:
             "dataset": case.dataset_path,
             "task_id": case.task_id,
             "environment": config.benchmark.environment,
+            "experiment_group": (
+                config.experiment.group
+                or (
+                    f"{config.collaboration.mode}_consensus"
+                    if config.proposal.enabled
+                    else config.collaboration.mode
+                )
+            ),
             "task": engine.task,
             "workflow": config.collaboration.mode,
             "collaboration_mode": config.collaboration.mode,
@@ -369,6 +423,9 @@ class MultiAgentBenchAdapter:
             "accuracy": None,
             "effectiveness": effectiveness,
             "efficiency": efficiency,
+            "requested_metrics": config.benchmark.metrics,
+            "kpi_requested": kpi_requested,
+            "kpi_evaluated": kpi_evaluated,
             "success_rate": evaluator_metrics["success_rate"],
             "completion_rate": evaluator_metrics["success_rate"],
             "token_consumption": evaluator_metrics["total_tokens"],
@@ -384,7 +441,7 @@ class MultiAgentBenchAdapter:
             "evaluator_source": "marble_evaluator_fallback",
             "benchmark_score_note": (
                 "No repository-local MultiAgentBench official evaluator was found. "
-                "Research tasks are scored with MARBLE evaluator completion/KPI "
+                "Tasks are scored with MARBLE evaluator completion/KPI "
                 "signals and normalized into the standard MAB metric schema."
             ),
             "evaluator_metrics": engine.evaluator.metrics,
@@ -428,9 +485,51 @@ class MultiAgentBenchAdapter:
             override = config.agents.agent_overrides.get(str(agent_config["agent_id"]))
             if override:
                 agent_config.update(override)
-            agent_config.setdefault("llm", config.agents.model)
             agents.append(agent_config)
+        byzantine_agent_ids = set(
+            self._byzantine_agent_ids(
+                [str(agent["agent_id"]) for agent in agents],
+                config,
+            )
+        )
+        for agent_config in agents:
+            agent_id = str(agent_config["agent_id"])
+            is_byzantine = agent_id in byzantine_agent_ids
+            agent_config["consensus_role"] = (
+                "byzantine" if is_byzantine else "honest"
+            )
+            role_model = self._model_for_role(
+                "byzantine" if is_byzantine else "honest",
+                config,
+            )
+            if not agent_config.get("llm"):
+                agent_config["llm"] = role_model
         return agents
+
+    def _byzantine_agent_ids(
+        self,
+        agent_ids: List[str],
+        config: ExperimentConfig,
+    ) -> List[str]:
+        if config.agents.byzantine_agent_ids:
+            selected = list(dict.fromkeys(config.agents.byzantine_agent_ids))
+            missing = [agent_id for agent_id in selected if agent_id not in agent_ids]
+            if missing:
+                raise ValueError(
+                    "agents.byzantine_agent_ids not found in selected agents: "
+                    + ", ".join(missing)
+                )
+            return selected
+        if config.agents.num_byzantine <= 0:
+            return []
+        return agent_ids[-config.agents.num_byzantine :]
+
+    def _model_for_role(self, role: str, config: ExperimentConfig) -> Any:
+        return (
+            config.agents.models.get(role)
+            or config.agents.models.get("default")
+            or config.agents.model
+        )
 
     def _agent_capability_coefficients(
         self,
@@ -462,6 +561,7 @@ class MultiAgentBenchAdapter:
         self,
         raw: Mapping[str, Any],
         agent_ids: List[str],
+        role_base_mode: Optional[str] = None,
     ) -> List[List[str]]:
         selected = set(agent_ids)
         relationships = []
@@ -471,6 +571,10 @@ class MultiAgentBenchAdapter:
             source, target, rel_type = relationship
             if source in selected and target in selected:
                 relationships.append([source, target, rel_type])
+        if role_base_mode == "tree" and not any(
+            relationship[2] == "parent" for relationship in relationships
+        ):
+            relationships.extend(_tree_parent_relationships(agent_ids))
         return relationships or _fully_connected_relationships(agent_ids)
 
 
@@ -520,9 +624,22 @@ def _final_answer_from_proposal_records(
     return "\n".join(lines)
 
 
+def _benchmark_requests_kpi(config: ExperimentConfig) -> bool:
+    if config.benchmark.options.get("evaluate_kpi", False):
+        return True
+    metrics = config.benchmark.metrics
+    effectiveness = metrics.get("effectiveness", [])
+    if isinstance(effectiveness, str):
+        effectiveness = [effectiveness]
+    return any(str(metric).lower() == "kpi" for metric in effectiveness)
+
+
 def _effectiveness_metrics(
     evaluator_metrics: Dict[str, Any],
     *,
+    kpi_requested: bool = False,
+    kpi_evaluated: bool = False,
+    requested_metrics: Optional[Dict[str, Any]] = None,
     kpi_error: Optional[str] = None,
 ) -> Dict[str, Any]:
     total_milestones = int(evaluator_metrics.get("total_milestones") or 0)
@@ -535,8 +652,23 @@ def _effectiveness_metrics(
         for agent_id, count in agent_kpis.items()
     }
     accomplished = max(agent_kpis.values(), default=0)
+    if kpi_error:
+        kpi_status = "error"
+    elif not kpi_requested:
+        kpi_status = "not_requested"
+    elif not kpi_evaluated:
+        kpi_status = "not_evaluated"
+    elif total_milestones == 0:
+        kpi_status = "evaluated_no_milestones_parsed"
+    else:
+        kpi_status = "evaluated"
     return {
         "metric": "KPI",
+        "kpi_requested": kpi_requested,
+        "kpi_evaluated": kpi_evaluated,
+        "kpi_status": kpi_status,
+        "requested_metrics": requested_metrics or {},
+        "kpi_evaluation_count": int(evaluator_metrics.get("kpi_evaluation_count") or 0),
         "definition": "n_j / M, accomplished milestones per agent over total milestones",
         "total_milestones_M": total_milestones,
         "agent_accomplished_milestones_nj": agent_kpis,

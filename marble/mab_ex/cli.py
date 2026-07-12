@@ -1,4 +1,4 @@
-﻿"""Command-line entry point for MARBLE experiments."""
+"""Command-line entry point for MARBLE experiments."""
 
 from __future__ import annotations
 
@@ -22,16 +22,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-level",
-        default="INFO",
+        default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Console logging level.",
+        help="Console logging level. Defaults to experiment.log_level.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level))
     try:
         from marble.mab_ex.benchmarks import BENCHMARK_ADAPTERS
         from marble.mab_ex.config import ExperimentConfig
@@ -42,6 +41,8 @@ def main() -> None:
         )
 
         config = ExperimentConfig.load(args.config)
+        log_level = args.log_level or config.experiment.log_level
+        logging.basicConfig(level=getattr(logging, log_level))
         adapter = BENCHMARK_ADAPTERS.create(config.benchmark.type)
         selected_case_ids = adapter.list_case_ids(config)
         should_task_sweep = args.all_tasks or (
@@ -55,8 +56,6 @@ def main() -> None:
                 config,
                 ignore_task_id=args.all_tasks,
             ).run_all_cases()
-        elif should_agent_sweep:
-            result = AgentCountSweepRunner(config).run()
         else:
             result = ExperimentRunner(config).run()
     except Exception:
@@ -68,4 +67,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
