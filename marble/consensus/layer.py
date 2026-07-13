@@ -245,6 +245,7 @@ class ConsensusLayer:
                 verifier_agent_ids=verifier_agent_ids,
                 proposal_summary=submission.proposal_summary,
                 parent_proposals=submission.parent_proposals,
+                metadata=submission.metadata,
             )
             self.completed_results.append(result)
             completion_event = {

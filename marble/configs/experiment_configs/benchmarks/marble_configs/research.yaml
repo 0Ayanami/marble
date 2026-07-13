@@ -1,0 +1,22 @@
+benchmark_name: multiagentbench_research
+environment: research
+scenario: research
+dataset: multiagentbench/research/research_main.jsonl
+task_id: 1-10
+defaults:
+  coordinate_mode: graph
+  environment:
+    type: Research
+options:
+  evaluate_kpi: true
+metrics:
+  effectiveness:
+    - KPI
+  efficiency:
+    - task_completion_time
+    - extra_time_cost
+    - interaction_count
+    - message_count
+    - extra_message_count
+    - qc_evolvement
+    - voting_agents_count_evolvement

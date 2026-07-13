@@ -29,7 +29,6 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
         epsilon_ratio: float = 0.1,
         epsilon: Optional[float] = None,
         use_dynamic_estimate: bool = False,
-        
         fisher_lda: Optional[Mapping[str, object]] = None,
         alpha_initial: float = 0.6,
         beta_initial: float = 0.4,
@@ -164,7 +163,7 @@ class SmartQuorumConsensus(MajorityVoteConsensus):
                 "has_weighted_majority": has_weighted_majority,
                 "proposal_confidence_score": proposal_confidence_score,
                 "proposal_confidence_method": "weighted_by_agent_weight",
-                "fisher_ida": self.fisher_ida_metadata(),
+                "fisher_lda": self.fisher_lda_metadata(),
                 "agent_weights": dict(self.agent_weights),
                 "honest_agents": sorted(self.honest_agents),
                 "byzantine_agents": sorted(self.byzantine_agents),

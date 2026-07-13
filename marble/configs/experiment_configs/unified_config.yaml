@@ -9,7 +9,7 @@ agents:
   model: qwen3-max-preview
   capability_coefficient: 8.4
   models:
-    honest: qwen3-max-preview
+    honest: qwen3-8b
     byzantine: qwen3-8b
   model_capability_coefficients:
     qwen3.6-max-preview: 8.85
@@ -26,7 +26,7 @@ collaboration:
     use_agent_act: true
 
 proposal:
-  proposal: true
+  enabled: true
   builder_enabled: true
   verification_enabled: true
   weight_manager_enabled: true
@@ -58,7 +58,7 @@ proposal:
     vote_window: 30
     initial_vc: 0.5
     initial_hc: 0.5
-  fisher_ida:
+  fisher_lda:
     enabled: false
     alpha_initial: 0.6
     beta_initial: 0.4
@@ -75,4 +75,3 @@ benchmark:
 sweep:
   agent_counts: [5, 7]
   byzantine_counts: [0]
-

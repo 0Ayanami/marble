@@ -8,16 +8,6 @@ from typing import Any, Dict, List, Optional, Union
 
 from marble.agent import BaseAgent
 from marble.configs.config import Config
-from marble.consensus.majority_vote import MajorityVoteConsensus
-from marble.consensus.smart_quorum import SmartQuorumConsensus
-from marble.consensus.weight_manager import WeightManager
-from marble.consensus.workflow import MemoryConsensusWorkflow
-from marble.consensus.verification_engine import (
-    HeuristicProposalEvaluator,
-    LLMProposalEvaluator,
-    VerificationEngine,
-)
-from marble.memory.consensus_memory import ConsensusMemory
 from marble.engine.engine_planner import EnginePlanner
 from marble.environments.base_env import BaseEnvironment
 from marble.evaluator.evaluator import Evaluator
@@ -72,7 +62,15 @@ class Engine:
             agent.set_agent_graph(self.graph)
         # Initialize Memory
         self.memory = self._initialize_memory(config.memory)
-        if isinstance(self.memory, SharedMemory):
+        if config.memory.get("max_shared_memory_items") is not None:
+            setattr(
+                self.memory,
+                "max_prompt_items",
+                int(config.memory["max_shared_memory_items"]),
+            )
+        if isinstance(self.memory, SharedMemory) and config.memory.get(
+            "inject_shared_memory", True
+        ):
             for agent in self.agents:
                 agent.shared_memory = self.memory
         # Initialize Evaluator
@@ -93,6 +91,7 @@ class Engine:
         )
         self.max_iterations = config.environment.get("max_iterations", 10)
         self.current_iteration = 0
+        self.last_run_result: Dict[str, Any] = {}
 
         self.logger.info("Engine initialized.")
 
@@ -187,7 +186,7 @@ class Engine:
 
     def _initialize_memory(
         self, memory_config: Dict[str, Any]
-    ) -> Union[SharedMemory, BaseMemory, ConsensusMemory]:
+    ) -> Union[SharedMemory, BaseMemory, Any]:
         """
         Initialize the shared memory mechanism.
 
@@ -198,10 +197,12 @@ class Engine:
             BaseMemory: An instance of the memory module.
         """
         memory_type = memory_config.get("type", "SharedMemory")
-        memory: Union[BaseMemory, SharedMemory, ConsensusMemory, None] = None
+        memory: Union[BaseMemory, SharedMemory, Any, None] = None
         if memory_type == "SharedMemory":
             memory = SharedMemory()
         elif memory_type == "ConsensusMemory":
+            from marble.memory.consensus_memory import ConsensusMemory
+
             memory = ConsensusMemory()
         else:
             memory = BaseMemory()
@@ -210,133 +211,6 @@ class Engine:
 
     def _environment_is(self, class_name: str) -> bool:
         return self.environment.__class__.__name__ == class_name
-
-    def _initialize_consensus_workflow(self) -> MemoryConsensusWorkflow:
-        consensus_config = self.config.consensus
-        if not isinstance(self.memory, ConsensusMemory):
-            self.memory = ConsensusMemory()
-            for agent in self.agents:
-                agent.shared_memory = self.memory
-
-        verification_config = consensus_config.get("verification", {})
-        verification_type = verification_config.get("type", "heuristic")
-        if verification_type == "llm":
-            fallback = (
-                HeuristicProposalEvaluator()
-                if verification_config.get("fallback_to_heuristic", True)
-                else None
-            )
-            evaluator = LLMProposalEvaluator(
-                model=verification_config.get("model"),
-                base_url=verification_config.get("base_url"),
-                env_path=verification_config.get("env_path", ".env"),
-                include_commented_env=verification_config.get(
-                    "include_commented_env", True
-                ),
-                fallback_evaluator=fallback,
-            )
-        else:
-            evaluator = HeuristicProposalEvaluator()
-
-        consensus_algorithm_config = consensus_config.get("algorithm", {})
-        consensus_strategy = consensus_algorithm_config.get(
-            "strategy",
-            consensus_algorithm_config.get("type", "majority_vote"),
-        )
-        common_consensus_kwargs = {
-            "confidence_threshold": consensus_algorithm_config.get(
-                "confidence_threshold", 0.6
-            ),
-            "majority_threshold": consensus_algorithm_config.get(
-                "majority_threshold", 0.5
-            ),
-            "strict_majority": consensus_algorithm_config.get(
-                "strict_majority", True
-            ),
-            "minimum_votes": consensus_algorithm_config.get("minimum_votes", 1),
-            "hard_fail_dimensions": consensus_algorithm_config.get(
-                "hard_fail_dimensions", ("security",)
-            ),
-        }
-        if consensus_strategy == "smart_quorum":
-            consensus = SmartQuorumConsensus(
-                agent_weights=consensus_algorithm_config.get("agent_weights", {}),
-                honest_agents=consensus_algorithm_config.get("honest_agents", []),
-                byzantine_agents=consensus_algorithm_config.get(
-                    "byzantine_agents", []
-                ),
-                epsilon_ratio=consensus_algorithm_config.get("epsilon_ratio", 0.1),
-                epsilon=consensus_algorithm_config.get("epsilon"),
-                use_dynamic_estimate=consensus_algorithm_config.get(
-                    "use_dynamic_estimate", False
-                ),
-                **common_consensus_kwargs,
-            )
-        else:
-            consensus = MajorityVoteConsensus(**common_consensus_kwargs)
-        weight_config = consensus_config.get("weight_manager", {})
-        weight_manager = (
-            WeightManager(**weight_config)
-            if consensus_config.get("enable_weight_manager", True)
-            else None
-        )
-        return MemoryConsensusWorkflow(
-            memory=self.memory,
-            verification_engine=VerificationEngine(evaluator=evaluator),
-            consensus=consensus,
-            weight_manager=weight_manager,
-            include_proposer_as_verifier=consensus_config.get(
-                "include_proposer_as_verifier", False
-            ),
-        )
-
-    def consensus_coordinate(self) -> None:
-        """Run proposal, verification, and majority-vote memory consensus."""
-        summary_data: Dict[str, Any] = {
-            "task": self.task,
-            "coordination_mode": self.coordinate_mode,
-            "consensus_algorithm": self.config.consensus.get("algorithm", {}).get(
-                "strategy",
-                self.config.consensus.get("algorithm", {}).get(
-                    "type", "majority_vote"
-                ),
-            ),
-            "results": [],
-            "committed_memory": [],
-        }
-        try:
-            workflow = self._initialize_consensus_workflow()
-            task_id = (
-                self.config.consensus.get("task_id")
-                or self.config.task.get("task_id")
-                or self.config.task.get("id")
-                or "consensus_task"
-            )
-            results = workflow.run_agents(
-                task_id=task_id,
-                task_description=self.task,
-                agents=self.graph.get_all_agents(),
-            )
-            summary_data["results"] = [result.to_dict() for result in results]
-            summary_data["committed_memory"] = [
-                proposal.to_dict()
-                for proposal in workflow.memory.retrieve_committed(task_id=task_id)
-            ]
-            summary_data["agent_weights"] = (
-                workflow.weight_manager.snapshots()
-                if workflow.weight_manager is not None
-                else []
-            )
-            self.logger.info(
-                "Consensus coordination completed with "
-                f"{len(summary_data['committed_memory'])} committed proposals."
-            )
-        except Exception:
-            self.logger.exception("An error occurred during consensus coordination.")
-            raise
-        finally:
-            self.evaluator.finalize()
-            self._write_to_jsonl(summary_data)
 
     def graph_coordinate(self) -> None:
         """
@@ -1089,6 +963,131 @@ class Engine:
             self.logger.info("Tree-based coordination simulation completed.")
             self._write_to_jsonl(summary_data)
 
+    def groupchat_coordinate(self) -> None:
+        """
+        Groupchat coordination mode.
+
+        This is a light wrapper over the existing MARBLE agents, planner, evaluator,
+        and graph membership. It keeps a shared transcript and asks each agent to
+        act in order while reusing the normal agent/tool/memory path.
+        """
+        try:
+            self.logger.info("Starting groupchat coordination.")
+            groupchat_config = self.config.engine_planner.get("groupchat", {})
+            rounds = int(groupchat_config.get("rounds", self.max_iterations or 1))
+            rounds = max(1, rounds)
+            agents = self.graph.get_all_agents()
+            transcript_lines: List[str] = []
+            agent_outputs: Dict[str, str] = {}
+            summary_data: Dict[str, Any] = {
+                "task": self.task,
+                "coordination_mode": self.coordinate_mode,
+                "iterations": [],
+                "group_transcript": "",
+                "agent_outputs": agent_outputs,
+            }
+
+            for round_index in range(rounds):
+                iteration_data: Dict[str, Any] = {
+                    "iteration": round_index + 1,
+                    "task_assignments": {},
+                    "task_results": [],
+                    "summary": "",
+                    "continue_simulation": True,
+                    "communications": [],
+                }
+                agents_results: List[Dict[str, Any]] = []
+                communications: List[Any] = []
+                for agent in agents:
+                    transcript = "\n".join(transcript_lines)
+                    task = (
+                        f"{self.task}\n\n"
+                        f"Agent profile: {agent.get_profile()}\n\n"
+                        f"Shared group transcript so far:\n"
+                        f"{transcript or '(empty)'}\n\n"
+                        "Contribute to the shared group discussion for this task. "
+                        "Use your role and any available memory/tools, and keep the "
+                        "response concise and useful for the final task outcome."
+                    )
+                    iteration_data["task_assignments"][agent.agent_id] = task
+                    result, communication = agent.act(task)
+                    result_text = str(result)
+                    agent_outputs[agent.agent_id] = result_text
+                    transcript_lines.append(f"{agent.agent_id}: {result_text}")
+                    if communication:
+                        communications.append(communication)
+                    agents_results.append({agent.agent_id: result_text})
+                    iteration_data["task_results"].append(
+                        {"agent_id": agent.agent_id, "result": result_text}
+                    )
+
+                iteration_data["communications"] = communications
+                summary = self._summarize_results(agents_results)
+                summary_from_planner = self.planner.summarize_output(
+                    summary, self.task, self.output_format
+                )
+                iteration_data["summary"] = summary_from_planner.content
+                self.planner.update_progress(summary_from_planner.content)
+
+                if communications:
+                    self.evaluator.metrics["communication_score"].append(-1)
+                else:
+                    self.evaluator.metrics["communication_score"].append(-1)
+                self.evaluator.metrics["planning_score"].append(-1)
+
+                continue_simulation = self.planner.decide_next_step(agents_results)
+                iteration_data["continue_simulation"] = continue_simulation
+                summary_data["iterations"].append(iteration_data)
+                if not continue_simulation:
+                    break
+
+            summary_data["group_transcript"] = "\n".join(transcript_lines)
+            summary_data["planning_scores"] = self.evaluator.metrics["planning_score"]
+            summary_data["communication_scores"] = self.evaluator.metrics[
+                "communication_score"
+            ]
+            summary_data["token_usage"] = self._get_totoal_token_usage()
+            summary_data["agent_kpis"] = self.evaluator.metrics["agent_kpis"]
+            summary_data["total_milestones"] = self.evaluator.metrics[
+                "total_milestones"
+            ]
+            self.logger.info("Groupchat coordination simulation completed.")
+        except Exception:
+            self.logger.exception("An error occurred during groupchat coordination.")
+            raise
+        finally:
+            self.evaluator.finalize()
+            self._write_to_jsonl(summary_data)
+
+    def role_based_coordinate(self) -> None:
+        """
+        Role-based coordination wrapper.
+
+        Role semantics live in agent profiles and relationships. The execution is
+        delegated to an existing MARBLE coordination mode selected by
+        engine_planner.role_based.base_mode.
+        """
+        role_config = self.config.engine_planner.get("role_based", {})
+        base_mode = str(role_config.get("base_mode", "tree")).replace("-", "_")
+        coordinate_methods = {
+            "tree": self.tree_coordinate,
+            "star": self.star_coordinate,
+            "graph": self.graph_coordinate,
+        }
+        if base_mode not in coordinate_methods:
+            raise ValueError(
+                "Unsupported role_based base_mode: "
+                f"{base_mode}. Expected one of: graph, star, tree."
+            )
+        self.logger.info(
+            f"Running role-based coordination with base mode '{base_mode}'."
+        )
+        self._active_role_based_base_mode = base_mode
+        try:
+            coordinate_methods[base_mode]()
+        finally:
+            self._active_role_based_base_mode = None
+
     def _execute_agent_task_recursive(self, agent: BaseAgent, task: str) -> Any:
         """
         Recursively execute tasks starting from the given agent.
@@ -1185,6 +1184,12 @@ class Engine:
         elif self.coordinate_mode == "graph":
             self.logger.info("Running in graph-based coordination mode.")
             self.graph_coordinate()
+        elif self.coordinate_mode == "groupchat":
+            self.logger.info("Running in groupchat coordination mode.")
+            self.groupchat_coordinate()
+        elif self.coordinate_mode == "role_based":
+            self.logger.info("Running in role-based coordination mode.")
+            self.role_based_coordinate()
         elif self.coordinate_mode == "chain":
             self.logger.info("Running in chain-based coordination mode.")
             self.chain_coordinate()
@@ -1192,8 +1197,12 @@ class Engine:
             self.logger.info("Running in tree-based coordination mode.")
             self.tree_coordinate()
         elif self.coordinate_mode == "consensus":
-            self.logger.info("Running in consensus memory coordination mode.")
-            self.consensus_coordinate()
+            raise ValueError(
+                "Unsupported coordinate mode: consensus. Consensus is an "
+                "event-driven extension layer, not a MARBLE agent workflow. "
+                "Use a normal workflow mode such as graph/chain/tree/star and "
+                "attach ConsensusLayer for proposal verification."
+            )
         else:
             self.logger.error(f"Unsupported coordinate mode: {self.coordinate_mode}")
             raise ValueError(f"Unsupported coordinate mode: {self.coordinate_mode}")
@@ -1242,6 +1251,13 @@ class Engine:
             "file_path", "result/discussion_output.jsonl"
         )
         try:
+            role_base_mode = getattr(self, "_active_role_based_base_mode", None)
+            if (
+                summary_data.get("coordination_mode") == "role_based"
+                and role_base_mode
+            ):
+                summary_data["role_based_base_mode"] = role_base_mode
+            self.last_run_result = summary_data
             with open(file_path, "a") as jsonl_file:
                 print(summary_data)
                 jsonl_file.write(json.dumps(summary_data) + "\n")
